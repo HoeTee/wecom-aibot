@@ -1,0 +1,8 @@
+.venv/
+node_modules/
+logs/
+__pycache__/
+backend/__pycache__/
+backend/mcp_client/__pycache__/
+*.pyc
+.env

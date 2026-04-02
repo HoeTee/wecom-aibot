@@ -1,0 +1,4 @@
+flask
+mcp
+openai
+pydantic-settings

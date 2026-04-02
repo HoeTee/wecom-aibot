@@ -1,0 +1,19 @@
+{
+  "name": "wecom-aibot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "gateway": "ts-node-esm gateway/long_connection.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "^1.0.4",
+    "dotenv": "^17.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
