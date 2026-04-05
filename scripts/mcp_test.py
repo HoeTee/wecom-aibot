@@ -1,18 +1,24 @@
 import asyncio
 import os
-
+import pprint
+from dotenv import load_dotenv
 from backend.mcp_client.mcp_minimal import MinimalMCPClient
 
-
-server_script_path = os.getenv("MCP_SERVER_URL", "").strip()
-
+async def test_mcp_client():
+    load_dotenv()
+    server_target = os.getenv("MCP_SERVER_URL")
+    mcp_client = MinimalMCPClient(server_target)
+    try:
+        await mcp_client.connect()
+        print("MCP client connected to server.")
+        print("MCP client tools:")
+        pprint.pprint(mcp_client.tools)
+    finally:
+        await mcp_client.cleanup()
+        print("MCP client closed.")
 
 async def main():
-    if not server_script_path:
-        raise ValueError("MCP_SERVER_URL is required to run mcp_test.py")
-    client = MinimalMCPClient(server_script_path)
-    await client.connect()
-    await client.cleanup()
+    await test_mcp_client()
 
 
 if __name__ == "__main__":
