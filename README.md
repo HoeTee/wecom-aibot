@@ -68,6 +68,11 @@ Optional:
 - `MCP_SERVERS_CONFIG` to load one or more MCP servers through a JSON config file
 - `MCP_SERVER_URL` as a legacy fallback for a single server only
 
+Security note:
+
+- `config/mcp_servers.json` is a local-only file and must not be committed because it may contain secrets such as API keys
+- runtime artifacts under `data/`, `persist/`, and `manifest/` must not be committed
+
 If `WECOM_BOT_ID` or `WECOM_BOT_SECRET` is missing, `npm run gateway` will fail at startup.
 
 The backend session memory uses a local SQLite file at `data/memory.sqlite3`.

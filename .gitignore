@@ -6,3 +6,11 @@ backend/__pycache__/
 backend/mcp_client/__pycache__/
 *.pyc
 .env
+config/mcp_servers.json
+data/
+persist/
+manifest/
+.tmp_*/
+evals/runs/
+evals/reports/
+*.docx
