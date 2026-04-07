@@ -231,14 +231,15 @@ def load_memory_context(session_id: str) -> str:
             (session_id,),
         ).fetchall()
 
-        turns = conn.execute(
+        user_turns = conn.execute(
             """
-            SELECT role, content
+            SELECT content
             FROM conversation_turns
             WHERE session_id = ?
+              AND role = 'user'
               AND created_at >= datetime('now', '-7 day')
             ORDER BY created_at DESC
-            LIMIT 6
+            LIMIT 3
             """,
             (session_id,),
         ).fetchall()
@@ -265,10 +266,10 @@ def load_memory_context(session_id: str) -> str:
             )
         sections.append("\n".join(doc_lines))
 
-    if turns:
-        turn_lines = ["Recent dialogue:"]
-        for row in reversed(turns):
-            turn_lines.append(f"- {row['role']}: {_short_text(row['content'], limit=300)}")
+    if user_turns:
+        turn_lines = ["Recent user requests:"]
+        for row in reversed(user_turns):
+            turn_lines.append(f"- user: {_short_text(row['content'], limit=300)}")
         sections.append("\n".join(turn_lines))
 
     if not sections:
