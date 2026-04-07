@@ -1,0 +1,11 @@
+connection.tools any other default attributes?
+
+BaseModel.required ? any other attributes?
+
+why not make _expose_tools into a dataclass like MCPToolRoutes?
+
+what does @property do on tools? 
+
+route flow: host -> server -> tool
+
+does .clear() work over any object? 

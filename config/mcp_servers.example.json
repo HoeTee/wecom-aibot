@@ -1,0 +1,31 @@
+{
+  "servers": [
+    {
+      "name": "wecom",
+      "tool_prefix": "wecom",
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "required": false
+    },
+    {
+      "name": "filesystem",
+      "tool_prefix": "fs",
+      "transport": "stdio",
+      "command": "npx.cmd",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\work"],
+      "required": false
+    },
+    {
+      "name": "local_python_server",
+      "tool_prefix": "localpy",
+      "transport": "stdio",
+      "command": ".venv\\Scripts\\python.exe",
+      "args": ["-m", "my_mcp_server"],
+      "cwd": ".",
+      "env": {
+        "MY_SERVER_MODE": "dev"
+      },
+      "required": false
+    }
+  ]
+}

@@ -2,3 +2,9 @@ flask
 mcp
 openai
 pydantic-settings
+python-dotenv
+llama-index-core
+llama-index-readers-file
+llama-index-llms-openai-like
+llama-index-embeddings-openai-like
+pypdf

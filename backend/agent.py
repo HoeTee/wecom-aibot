@@ -2,8 +2,10 @@
 Base Agent class — handles LLM communication, tool calling, context
 management, token tracking, and conversation logging.
 """
+from typing import Any, Callable, Protocol
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from openai import AsyncOpenAI, RateLimitError, APITimeoutError, APIConnectionError, InternalServerError
 import asyncio
 import json
@@ -20,7 +22,10 @@ class Settings(BaseSettings):
     )
     api_key: str = Field(..., alias="LLM_API_KEY")
     base_url: str = Field(..., alias="LLM_BASE_URL")
-    model: str = Field(..., alias="LLM_NAME")
+    model: str = Field(
+        ...,
+        validation_alias=AliasChoices("LLM_MODEL", "LLM_NAME"),
+    )
     temperature: float = Field(0.0, alias="TEMPERATURE")
     top_p: float = Field(0.01, alias="TOP_P")
     seed: int = Field(42, alias="SEED")
@@ -30,16 +35,25 @@ class Settings(BaseSettings):
     max_result_tokens: int = Field(5000, alias="MAX_RESULT_TOKENS")
 
 
+class ToolRuntime(Protocol):
+    tools: list[dict[str, Any]]
+
+    async def tool_message_from_call(self, tool_call: Any) -> dict[str, Any]:
+        ...
+
+
 class Agent:
 
     def __init__(
         self,
         system_prompt: str = "",
         name: str = "Agent",
-        mcp_client=None,
+        mcp_client: ToolRuntime | None = None,
         tools=None,
         settings: Settings = None,
-        debug: bool = False
+        debug: bool = False,
+        memory_context: str = "",
+        on_tool_result: Callable[[str, dict[str, Any], str], None] | None = None,
     ) -> None:
         """
         Initialize the Agent.
@@ -68,6 +82,7 @@ class Agent:
         self.max_tool_calls = self.settings.max_tool_calls
         self.max_context_tokens = self.settings.max_context_tokens
         self.max_result_tokens = self.settings.max_result_tokens
+        self.on_tool_result = on_tool_result
 
         # Token tracking
         self.token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -75,6 +90,8 @@ class Agent:
 
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
+        if memory_context:
+            self.messages.append({"role": "system", "content": memory_context})
 
 
 
@@ -150,6 +167,11 @@ class Agent:
             return f"No MCP client for tool {function_name}"
 
         result_str = str(result)
+        if self.on_tool_result:
+            try:
+                self.on_tool_result(function_name, args_dict, result_str)
+            except Exception as exc:
+                self._log(f"Failed to persist tool memory for '{function_name}': {exc}")
         estimated = self._estimate_tokens(len(result_str))
         if estimated > self.max_result_tokens:
             result_str = self._truncate_text(result_str)
@@ -163,7 +185,7 @@ class Agent:
         self.tool_call_count += len(tool_calls)
         self._log(f"Processing {len(tool_calls)} tool calls (total: {self.tool_call_count})")
 
-        if self.tool_call_count > self.max_tool_calls:
+        if self.tool_call_count > self.max_tool_calls: 
             print(f"[{self.name}] ⚠️ Max tool calls ({self.max_tool_calls}) reached. Aborting task and marking review invalid.")
             return "You have used up all your tool calls. Please provide the final answer."
 
