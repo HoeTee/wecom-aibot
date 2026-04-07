@@ -41,6 +41,9 @@ class ToolRuntime(Protocol):
     async def tool_message_from_call(self, tool_call: Any) -> dict[str, Any]:
         ...
 
+    async def call_tool(self, exposed_name: str, args: dict[str, Any]) -> str:
+        ...
+
 
 class Agent:
 
@@ -122,6 +125,12 @@ class Agent:
         max_chars = int(max_tokens / 0.3)
         return text[:max_chars] + "\n\n[... Content truncated ...]"
 
+    def _latest_user_message(self) -> str:
+        for message in reversed(self.messages):
+            if message.get("role") == "user":
+                return str(message.get("content", "")).strip()
+        return ""
+
     # ==================== Token Tracking ====================
 
     def _update_token_usage(self, usage: dict):
@@ -150,6 +159,42 @@ class Agent:
                     pass
             print(f"[{self.name}] ✗ Failed to parse tool arguments for {function_name}")
             return None
+
+    def _needs_rag_query_rewrite(self, function_name: str, args_dict: dict[str, Any]) -> bool:
+        return (
+            function_name.endswith("llamaindex_rag_query")
+            and isinstance(args_dict.get("query"), str)
+            and bool(str(args_dict.get("query", "")).strip())
+        )
+
+    async def _rewrite_rag_query(self, query: str) -> str:
+        latest_user_message = self._latest_user_message()
+        rewrite_prompt = (
+            "你是一个 RAG query rewrite helper。\n"
+            "任务：把用户请求改写成适合 PDF 知识库检索或总结的 query。\n"
+            "要求：\n"
+            "1. 保留用户明确提出的内容目标、结构要求、比较要求、表格要求、补充或改写要求。\n"
+            "2. 删除纯操作性指令，例如是否创建文档、是否回复简洁、是否告知创建成功。\n"
+            "3. 如果用户是在补充已有文档，保留“补什么内容”的要求，但不要写成文档操作指令。\n"
+            "4. 不要擅自增加领域约束，不要缩小或放大用户任务范围。\n"
+            "5. 输出纯文本 query，不要解释，不要加 markdown。\n\n"
+            f"最近一条用户消息：\n{latest_user_message}\n\n"
+            f"当前待改写 query：\n{query}"
+        )
+
+        completion = await self.client.chat.completions.create(
+            model=self.settings.model,
+            temperature=0.0,
+            top_p=0.01,
+            seed=self.settings.seed,
+            messages=[
+                {"role": "system", "content": "You rewrite user requests into source-grounded RAG queries."},
+                {"role": "user", "content": rewrite_prompt},
+            ],
+        )
+        self._update_token_usage(completion.usage)
+        rewritten = (completion.choices[0].message.content or "").strip()
+        return rewritten or query
     
     ## Execute a tool call and return text message.
     async def _execute_a_tool(self, tool_call: dict) -> str:
@@ -160,16 +205,32 @@ class Agent:
         if args_dict is None:
             return "Failed to parse tool arguments."
 
+        call_args = dict(args_dict)
+        persisted_args = dict(args_dict)
+        if self._needs_rag_query_rewrite(function_name, args_dict):
+            try:
+                rewritten_query = await self._rewrite_rag_query(str(args_dict["query"]))
+            except Exception as exc:
+                self._log(f"Failed to rewrite RAG query for '{function_name}': {exc}")
+            else:
+                if rewritten_query.strip() and rewritten_query.strip() != str(args_dict["query"]).strip():
+                    call_args["query"] = rewritten_query
+                    persisted_args["rewritten_query"] = rewritten_query
+                    self._log(f"Rewrote RAG query for '{function_name}'")
+
         if self.mcp_client:
-            tool_msg = await self.mcp_client.tool_message_from_call(tool_call)
-            result = tool_msg["content"]
+            if call_args == args_dict:
+                tool_msg = await self.mcp_client.tool_message_from_call(tool_call)
+                result = tool_msg["content"]
+            else:
+                result = await self.mcp_client.call_tool(function_name, call_args)
         else:
             return f"No MCP client for tool {function_name}"
 
         result_str = str(result)
         if self.on_tool_result:
             try:
-                self.on_tool_result(function_name, args_dict, result_str)
+                self.on_tool_result(function_name, persisted_args, result_str)
             except Exception as exc:
                 self._log(f"Failed to persist tool memory for '{function_name}': {exc}")
         estimated = self._estimate_tokens(len(result_str))
