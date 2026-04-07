@@ -1,0 +1,12 @@
+gates:
+  - id: must_bind_doc_triple
+    description: A successful document action must preserve doc_id, doc_url, and doc_name when available.
+
+  - id: must_not_claim_success_on_failure
+    description: The assistant must not report success when the document tool failed.
+
+  - id: must_reuse_existing_doc_on_followup
+    description: A follow-up edit must reuse the existing document unless the user explicitly asks for a new document.
+
+  - id: must_follow_requested_structure
+    description: When the user asks for a specific document structure, the final document must follow it.

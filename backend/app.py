@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 from flask import Flask, jsonify, request
 
@@ -17,6 +18,11 @@ from backend.memory import (
 
 app = Flask(__name__)
 init_db()
+DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "system" / "assistant_v1.md"
+
+
+def load_system_prompt() -> str:
+    return DEFAULT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 
 async def run_agent(payload: dict) -> str:
@@ -53,10 +59,7 @@ async def run_agent(payload: dict) -> str:
 
         agent = Agent(
             name="WeComBackendAgent",
-            system_prompt=(
-                "You are a concise enterprise assistant. "
-                "Use available MCP tools when they help answer the user."
-            ),
+            system_prompt=load_system_prompt(),
             mcp_client=mcp_runtime,
             memory_context=memory_context,
             on_tool_result=on_tool_result,

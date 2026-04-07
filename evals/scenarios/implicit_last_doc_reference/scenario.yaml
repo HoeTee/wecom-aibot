@@ -1,0 +1,10 @@
+id: implicit_last_doc_reference
+goal: Resolve an implicit reference to the last document and update it.
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+  - turns/turn_2.txt
+gates:
+  - must_bind_doc_triple
+  - must_reuse_existing_doc_on_followup
+  - must_not_claim_success_on_failure
