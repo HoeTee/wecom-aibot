@@ -51,4 +51,12 @@
 - memory 读写或注入逻辑
 - orchestration flow
 
-改完后，必须重跑同一批固定 eval 场景，再比较结果。
+改完后，必须重跑同一批固定 eval 场景。
+
+当前 workflow：
+
+1. coding agent 做一轮收敛修改
+2. 跑固定 scenarios
+3. 先看 shared hard gates 是否通过
+4. 再由 human reviewer 给出最终结论
+5. 只有在结论明确后，才进入下一轮修改

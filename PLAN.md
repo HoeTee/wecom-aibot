@@ -67,7 +67,7 @@
 
 - 固定场景
 - 固定 hard gates
-- 固定 reviewer rubric
+- 固定 human review 规则
 - 固定 run artifacts
 
 ### Phase 1
@@ -88,7 +88,7 @@
 - tool trace
 - doc binding
 - gate result
-- reviewer result
+- human reviewer 的最终结论
 
 ### Phase 3
 
@@ -107,5 +107,6 @@
 - 中文 system prompt
 - 中文业务知识文档
 - 可重复的回归方式
+- 最终由 human reviewer 给出 `pass/fail + 主要问题`
 
 做到这一步后，项目就会从“能跑”变成“能证明自己有没有变好”。

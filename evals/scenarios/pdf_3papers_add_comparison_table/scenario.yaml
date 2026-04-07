@@ -1,5 +1,5 @@
 id: pdf_3papers_add_comparison_table
-goal: Update the previously created summary document by adding a comparison table.
+goal: 在已有总结文档上补充 comparison table，而不是新建文档。
 prompt_version: assistant_v1
 assets:
   - knowledge_base/papers/2505.12540v4.pdf

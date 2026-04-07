@@ -1,5 +1,5 @@
 id: implicit_last_doc_reference
-goal: Resolve an implicit reference to the last document and update it.
+goal: 正确解析“上一个文档”这一隐式引用，并更新同一份文档。
 prompt_version: assistant_v1
 turns:
   - turns/turn_1.txt

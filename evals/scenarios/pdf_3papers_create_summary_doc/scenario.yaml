@@ -1,5 +1,5 @@
 id: pdf_3papers_create_summary_doc
-goal: Summarize the three tracked PDFs into a new WeCom document.
+goal: 将三篇固定论文总结成一份新的企业微信文档。
 prompt_version: assistant_v1
 assets:
   - knowledge_base/papers/2505.12540v4.pdf

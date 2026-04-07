@@ -1,5 +1,5 @@
 id: reply_after_success
-goal: Verify the assistant reply style after a successful document action.
+goal: 验证文档操作成功后，assistant 的回复是否简洁且明确。
 prompt_version: assistant_v1
 turns:
   - turns/turn_1.txt
