@@ -66,7 +66,11 @@ class MCPHost:
         self.logger.info(
             "Registered MCP server '%s' with exposed tools: %s",
             server_name,
-            [tool["function"]["name"] for tool in self._tools if tool["function"]["name"].startswith(f"{prefix}__")],
+            [
+                tool["function"]["name"]
+                for tool in self._tools
+                if tool["function"]["name"].startswith(f"{prefix}__")
+            ],
         )
 
     def _expose_tool(
@@ -98,14 +102,16 @@ class MCPHost:
         if "create_doc" in name:
             return (
                 f"{description} "
-                "Use this only when the user explicitly wants a new document or no existing target document is available."
+                "Use this only when the user explicitly wants a new document or no existing target document is available. "
+                "When creating a summary document, write the requested core sections first and do not add comparison tables unless the user explicitly asks for a table."
             )
 
         if any(token in name for token in ("edit_doc", "update_doc", "doc_content", "smartsheet")):
             return (
                 f"{description} "
                 "For follow-up edits, reuse the existing doc_id/doc_url/doc_name from session memory when available. "
-                "Do not create a new document unless the user explicitly asks for one."
+                "Do not create a new document unless the user explicitly asks for one. "
+                "If the user asks to add a table or append content, update the existing document instead of rewriting unrelated sections."
             )
 
         if "doc" in name or "wecom" in server:

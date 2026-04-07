@@ -65,7 +65,19 @@ class LlamaIndexRAGEngine:
             response_mode="tree_summarize"
         )
 
-        summary_response = summary_query_engine.query(query)
+        summary_query = (
+            "Answer in Chinese and rely only on the PDF knowledge base.\n"
+            "If the request is about summarizing multiple papers, produce a structured synthesis with these sections when applicable:\n"
+            "1. 背景\n"
+            "2. 每篇论文摘要（每篇至少包含研究目标、方法、主要发现）\n"
+            "3. 横向对比（共同点、主要差异、优缺点）\n"
+            "4. 结论与建议\n"
+            "Do not introduce a comparison table unless the request explicitly asks for a table.\n"
+            "If evidence is insufficient for a claim, say so explicitly.\n\n"
+            f"User request:\n{query}"
+        )
+
+        summary_response = summary_query_engine.query(summary_query)
         vector_response = vector_query_engine.query(query)
 
         parts: list[str] = []
