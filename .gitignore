@@ -10,6 +10,7 @@ data/
 persist/
 manifest/
 .tmp_*/
+.tmp_*
 evals/runs/
 evals/reports/
 *.docx
