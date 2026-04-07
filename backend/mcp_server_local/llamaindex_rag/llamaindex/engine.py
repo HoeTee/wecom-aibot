@@ -49,10 +49,44 @@ class LlamaIndexRAGEngine:
             model_name=embed_model,
         )
 
+    def _content_query(self, query: str) -> str:
+        content_query = query
+        replacements = {
+            "生成一份企业微信文档": "生成一份基于来源材料的文档内容",
+            "给刚才那份文档": "",
+            "不要新建文档": "",
+            "回复要简洁，并明确告诉我是否已经创建文档。": "",
+            "回复要简洁，并明确告诉我是否已经创建文档": "",
+        }
+
+        for old, new in replacements.items():
+            content_query = content_query.replace(old, new)
+
+        filtered_lines: list[str] = []
+        for line in content_query.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "明确告诉我是否已经创建文档" in stripped:
+                continue
+            if stripped.startswith("回复要"):
+                continue
+            filtered_lines.append(stripped)
+
+        return "\n".join(filtered_lines).strip() or query.strip()
+
     def query(self, query: str) -> str:
         bundle = self.builder.build()
         if bundle is None:
             return "No index available. Please check the data directory and try again."
+
+        content_query = self._content_query(query)
+        source_files = bundle.source_files
+        source_file_block = "\n".join(f"- {name}" for name in source_files)
+        summary_brief_block = "\n\n".join(
+            f"## {document.metadata.get('file_name', document.doc_id)}\n{document.text}"
+            for document in bundle.summary_documents
+        )
 
         retriever = bundle.vector_index.as_retriever(similarity_top_k=self.similarity_top_k)
         postprocessors = [self.reranker] if self.reranker else []
@@ -61,24 +95,26 @@ class LlamaIndexRAGEngine:
             retriever=retriever,
             node_postprocessors=postprocessors,
         )
-        summary_query_engine = bundle.summary_index.as_query_engine(
-            response_mode="tree_summarize"
-        )
-
         summary_query = (
-            "Answer in Chinese and rely only on the PDF knowledge base.\n"
-            "If the request is about summarizing multiple papers, produce a structured synthesis with these sections when applicable:\n"
+            "Answer in Chinese and rely only on the provided paper briefs.\n"
+            f"The knowledge base currently contains exactly {len(source_files)} PDF documents:\n{source_file_block}\n\n"
+            "Treat each listed PDF as one paper and use all of them unless the user explicitly narrows scope.\n"
+            "Do not invent missing-domain constraints such as NLP/CV/multimodal.\n"
+            "If the request also contains document-creation, document-editing, or reply-style instructions, ignore those operational instructions here and focus only on the source-grounded content that should go into the document body.\n"
+            "Do not introduce a comparison table unless the request explicitly asks for a table.\n"
+            "Do not answer with '材料不足' just because the request mentions creating or editing a document.\n"
+            "Only mark a field as unknown when the paper brief itself does not provide enough information.\n"
+            "When the user requests a multi-paper summary, produce a structured synthesis with these sections when applicable:\n"
             "1. 背景\n"
             "2. 每篇论文摘要（每篇至少包含研究目标、方法、主要发现）\n"
             "3. 横向对比（共同点、主要差异、优缺点）\n"
-            "4. 结论与建议\n"
-            "Do not introduce a comparison table unless the request explicitly asks for a table.\n"
-            "If evidence is insufficient for a claim, say so explicitly.\n\n"
-            f"User request:\n{query}"
+            "4. 结论与建议\n\n"
+            f"Paper briefs:\n{summary_brief_block}\n\n"
+            f"Content task:\n{content_query}"
         )
 
-        summary_response = summary_query_engine.query(summary_query)
-        vector_response = vector_query_engine.query(query)
+        summary_response = Settings.llm.complete(summary_query)
+        vector_response = vector_query_engine.query(content_query)
 
         parts: list[str] = []
         summary_text = str(summary_response).strip()

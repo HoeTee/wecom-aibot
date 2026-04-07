@@ -33,7 +33,7 @@ async def llamaindex_rag_query(query: str) -> str:
 
     Use this tool for source-based summarization, comparison, and document drafting.
     For summary requests, prefer structured output that can be turned into:
-    背景、每篇论文摘要、横向对比、结论与建议.
+    背景、每篇论文摘要、横向对比、结论与建议。
     """
     return rag_engine.query(query)
 

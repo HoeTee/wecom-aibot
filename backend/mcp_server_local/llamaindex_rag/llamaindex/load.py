@@ -59,10 +59,6 @@ class LlamaIndexLoader:
         pdf_files = self._pdf_files(data_dir)
         if not pdf_files:
             raise FileNotFoundError(f"No PDF files found in data directory: {data_dir}")
-        
-        for item in data_dir.iterdir():
-            if item.is_file() and item.suffix.lower() != ".pdf":
-                raise ValueError(f"All files must be in PDF format. Found inconsistent file: {item}")
 
     def load(self):
         self._validate_data_dir(self.data_dir)
