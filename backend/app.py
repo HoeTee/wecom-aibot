@@ -25,6 +25,14 @@ def load_system_prompt() -> str:
     return DEFAULT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 
+def is_fresh_document_request(content: str) -> bool:
+    text = str(content or "").strip()
+    if not text:
+        return False
+    fresh_tokens = ("重新生成", "重新写一份", "重新出一份", "新生成一份", "新建一份")
+    return "文档" in text and any(token in text for token in fresh_tokens)
+
+
 async def run_agent(payload: dict) -> str:
     mcp_runtime = None
     content = str(payload.get("content", "")).strip()
@@ -33,7 +41,10 @@ async def run_agent(payload: dict) -> str:
         chat_id=payload.get("chatId"),
         user_id=str(payload.get("userId", "")),
     )
-    memory_context = load_memory_context(session_id)
+    memory_context = load_memory_context(
+        session_id,
+        include_bound_doc=not is_fresh_document_request(content),
+    )
 
     def on_tool_result(tool_name: str, args_dict: dict, result_text: str) -> None:
         save_tool_call(session_id, tool_name, args_dict, result_text)

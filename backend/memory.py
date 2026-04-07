@@ -213,7 +213,7 @@ def upsert_session_doc(
         conn.commit()
 
 
-def load_memory_context(session_id: str) -> str:
+def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
     session_id = str(session_id or "").strip()
     if not session_id:
         return ""
@@ -246,7 +246,7 @@ def load_memory_context(session_id: str) -> str:
 
     sections: list[str] = []
 
-    if docs:
+    if docs and include_bound_doc:
         latest = docs[0]
         doc_lines = [
             "Current bound document:",

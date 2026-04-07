@@ -170,6 +170,54 @@ class Agent:
         rewritten = "\n".join(filtered_lines).strip()
         return rewritten or str(query).strip()
 
+    def _latest_user_message(self) -> str:
+        for message in reversed(self.messages):
+            if message.get("role") == "user":
+                return str(message.get("content", "")).strip()
+        return ""
+
+    def _is_fresh_document_request(self) -> bool:
+        latest_user_message = self._latest_user_message()
+        fresh_tokens = ("重新生成", "重新写一份", "重新出一份", "新生成一份", "新建一份")
+        return "文档" in latest_user_message and any(token in latest_user_message for token in fresh_tokens)
+
+    def _user_requested_table(self) -> bool:
+        latest_user_message = self._latest_user_message()
+        return any(token in latest_user_message for token in ("表格", "对比表", "comparison table"))
+
+    def _user_requested_structured_summary(self) -> bool:
+        latest_user_message = self._latest_user_message()
+        required_tokens = ("背景", "每篇论文摘要", "横向对比", "结论与建议")
+        return all(token in latest_user_message for token in required_tokens)
+
+    def _validate_doc_tool_arguments(self, function_name: str, args_dict: dict[str, Any]) -> str | None:
+        name = function_name.lower()
+        if "edit_doc" not in name and "doc_content" not in name:
+            return None
+
+        content = str(args_dict.get("content", "") or "").strip()
+        if not content:
+            return None
+
+        if "..." in content:
+            return "Document content validation failed: placeholder text '...' is not allowed."
+
+        if self._user_requested_structured_summary():
+            required_sections = ("背景", "每篇论文摘要", "横向对比", "结论与建议")
+            missing_sections = [section for section in required_sections if section not in content]
+            if missing_sections:
+                return (
+                    "Document content validation failed: missing required sections: "
+                    + ", ".join(missing_sections)
+                )
+
+        if not self._user_requested_table():
+            forbidden_table_markers = ("## 5.", "### 5.", "技术对比表")
+            if any(marker in content for marker in forbidden_table_markers):
+                return "Document content validation failed: comparison table content is not allowed in this turn."
+
+        return None
+
     async def _execute_a_tool(self, tool_call: Any) -> str:
         function_name = tool_call.function.name
         self._log(f"Calling tool: {function_name}")
@@ -186,6 +234,11 @@ class Agent:
                 call_args["query"] = rewritten_query
                 persisted_args["rewritten_query"] = rewritten_query
                 self._log(f"Rewrote RAG query for '{function_name}'")
+
+        validation_error = self._validate_doc_tool_arguments(function_name, call_args)
+        if validation_error:
+            self._log(validation_error)
+            return validation_error
 
         if not self.mcp_client:
             return f"No MCP client for tool {function_name}"

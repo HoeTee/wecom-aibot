@@ -103,6 +103,7 @@ class MCPHost:
             return (
                 f"{description} "
                 "Use this only when the user explicitly wants a new document or no existing target document is available. "
+                "If the user says to regenerate, rewrite, or create a fresh document, treat that as a new-document request. "
                 "When creating a summary document, write the requested core sections first and do not add comparison tables unless the user explicitly asks for a table."
             )
 
@@ -110,6 +111,7 @@ class MCPHost:
             return (
                 f"{description} "
                 "For follow-up edits, reuse the existing doc_id/doc_url/doc_name from session memory when available. "
+                "Do not use the currently bound document when the user explicitly asks to regenerate or create a fresh document. "
                 "Do not create a new document unless the user explicitly asks for one. "
                 "If the user asks to add a table or append content, update the existing document instead of rewriting unrelated sections."
             )
