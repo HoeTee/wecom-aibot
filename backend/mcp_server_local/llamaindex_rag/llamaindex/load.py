@@ -5,7 +5,8 @@ from llama_index.core import SimpleDirectoryReader
 from llama_index.readers.file import PDFReader
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DATA_DIR = PROJECT_ROOT / "docs"
+DEFAULT_PAPER_DIR = PROJECT_ROOT / "knowledge_base" / "papers"
+LEGACY_DATA_DIR = PROJECT_ROOT / "docs"
 
 
 class LlamaIndexLoader:
@@ -14,7 +15,13 @@ class LlamaIndexLoader:
             self, 
             data_dir: Path | None = None
         ) -> None: 
-        self.data_dir = Path(DATA_DIR if data_dir is None else data_dir).resolve()
+        resolved_dir = data_dir
+        if resolved_dir is None:
+            if DEFAULT_PAPER_DIR.exists():
+                resolved_dir = DEFAULT_PAPER_DIR
+            else:
+                resolved_dir = LEGACY_DATA_DIR
+        self.data_dir = Path(resolved_dir).resolve()
     
 
     def _pdf_files(self, file_dir: Path | None = None) -> list[Path]: 

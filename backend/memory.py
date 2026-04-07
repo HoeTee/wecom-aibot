@@ -231,18 +231,6 @@ def load_memory_context(session_id: str) -> str:
             (session_id,),
         ).fetchall()
 
-        tool_calls = conn.execute(
-            """
-            SELECT tool_name, args_json, result_excerpt
-            FROM tool_calls
-            WHERE session_id = ?
-              AND created_at >= datetime('now', '-30 day')
-            ORDER BY created_at DESC
-            LIMIT 6
-            """,
-            (session_id,),
-        ).fetchall()
-
         turns = conn.execute(
             """
             SELECT role, content
@@ -250,7 +238,7 @@ def load_memory_context(session_id: str) -> str:
             WHERE session_id = ?
               AND created_at >= datetime('now', '-7 day')
             ORDER BY created_at DESC
-            LIMIT 10
+            LIMIT 6
             """,
             (session_id,),
         ).fetchall()
@@ -258,8 +246,17 @@ def load_memory_context(session_id: str) -> str:
     sections: list[str] = []
 
     if docs:
-        doc_lines = ["Recent docs:"]
-        for row in docs:
+        latest = docs[0]
+        doc_lines = [
+            "Current bound document:",
+            f"- doc_id={latest['doc_id']}",
+            f"- doc_name={latest['doc_name'] or ''}",
+            f"- doc_url={latest['doc_url'] or ''}",
+            f"- last_tool={latest['last_tool_name']}",
+        ]
+        if len(docs) > 1:
+            doc_lines.append("Other recent docs:")
+        for row in docs[1:]:
             doc_lines.append(
                 f"- doc_id={row['doc_id']}; "
                 f"doc_name={row['doc_name'] or ''}; "
@@ -267,14 +264,6 @@ def load_memory_context(session_id: str) -> str:
                 f"last_tool={row['last_tool_name']}"
             )
         sections.append("\n".join(doc_lines))
-
-    if tool_calls:
-        tool_lines = ["Recent MCP calls:"]
-        for row in reversed(tool_calls):
-            tool_lines.append(
-                f"- {row['tool_name']} args={row['args_json']} result={row['result_excerpt']}"
-            )
-        sections.append("\n".join(tool_lines))
 
     if turns:
         turn_lines = ["Recent dialogue:"]
@@ -286,7 +275,7 @@ def load_memory_context(session_id: str) -> str:
         return ""
 
     return (
-        "Session memory from this same WeCom conversation. "
-        "When the user refers to a previous document, prefer the exact doc_id recorded here.\n\n"
+        "Session memory from this same WeCom conversation.\n"
+        "Rule: when the user refers to the previous or last document, prefer the currently bound doc_id recorded here unless the user explicitly asks for a new document.\n\n"
         + "\n\n".join(sections)
     )

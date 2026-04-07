@@ -76,6 +76,7 @@ class MCPHost:
         tool: dict[str, Any],
     ) -> dict[str, Any]:
         description = tool["function"].get("description") or f"MCP tool from {server_name}"
+        description = self._augment_tool_description(server_name, exposed_name, description)
         return {
             "type": tool["type"],
             "function": {
@@ -84,6 +85,36 @@ class MCPHost:
                 "parameters": tool["function"].get("parameters", {}),
             },
         }
+
+    def _augment_tool_description(
+        self,
+        server_name: str,
+        exposed_name: str,
+        description: str,
+    ) -> str:
+        name = exposed_name.lower()
+        server = server_name.lower()
+
+        if "create_doc" in name:
+            return (
+                f"{description} "
+                "Use this only when the user explicitly wants a new document or no existing target document is available."
+            )
+
+        if any(token in name for token in ("edit_doc", "update_doc", "doc_content", "smartsheet")):
+            return (
+                f"{description} "
+                "For follow-up edits, reuse the existing doc_id/doc_url/doc_name from session memory when available. "
+                "Do not create a new document unless the user explicitly asks for one."
+            )
+
+        if "doc" in name or "wecom" in server:
+            return (
+                f"{description} "
+                "Prefer continuity: if the user refers to the last document, operate on the bound document when available."
+            )
+
+        return description
 
     async def call_tool(self, exposed_name: str, args: dict[str, Any]) -> str:
         route = self._routes.get(exposed_name)
