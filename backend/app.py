@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 from pathlib import Path
 
 from flask import Flask, jsonify, request
+from werkzeug.utils import secure_filename
 
 from backend.agent import Agent
 from backend.mcp_client import MCPHost, load_mcp_server_configs_from_env
@@ -19,6 +21,9 @@ from backend.memory import (
 app = Flask(__name__)
 init_db()
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "system" / "assistant_v1.md"
+KNOWLEDGE_BASE_PAPER_DIR = Path(__file__).resolve().parents[1] / "knowledge_base" / "papers"
+KNOWLEDGE_BASE_UPLOAD_DIR = KNOWLEDGE_BASE_PAPER_DIR / "uploads"
+PDF_HEADER = b"%PDF-"
 
 
 def load_system_prompt() -> str:
@@ -31,6 +36,48 @@ def is_fresh_document_request(content: str) -> bool:
         return False
     fresh_tokens = ("重新生成", "重新写一份", "重新出一份", "新生成一份", "新建一份")
     return "文档" in text and any(token in text for token in fresh_tokens)
+
+
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _normalize_pdf_filename(filename: str) -> str:
+    normalized = secure_filename(str(filename or "").strip())
+    if not normalized:
+        normalized = "uploaded.pdf"
+    if not normalized.lower().endswith(".pdf"):
+        normalized = f"{Path(normalized).stem or 'uploaded'}.pdf"
+    return normalized
+
+
+def _upload_storage_name(filename: str) -> str:
+    normalized_name = _normalize_pdf_filename(filename)
+    return f"upload__{normalized_name}"
+
+
+def _store_pdf_in_knowledge_base(file_bytes: bytes, original_name: str) -> tuple[Path, str]:
+    KNOWLEDGE_BASE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    target_path = KNOWLEDGE_BASE_UPLOAD_DIR / _upload_storage_name(original_name)
+
+    if target_path.exists():
+        existing_bytes = target_path.read_bytes()
+        if _sha256_bytes(existing_bytes) == _sha256_bytes(file_bytes):
+            return target_path, "unchanged"
+        action = "replaced"
+    else:
+        action = "added"
+
+    target_path.write_bytes(file_bytes)
+    return target_path, action
+
+
+def _build_upload_reply(stored_name: str, action: str) -> str:
+    if action == "unchanged":
+        return f"PDF `{stored_name}` 已存在于知识库，未重复写入。后续检索会继续使用它。"
+    if action == "replaced":
+        return f"PDF `{stored_name}` 已更新到知识库。后续检索会自动纳入新内容。"
+    return f"PDF `{stored_name}` 已加入知识库。后续检索会自动纳入它。"
 
 
 async def run_agent(payload: dict) -> str:
@@ -101,6 +148,48 @@ def chat():
         return jsonify({"reply": reply})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/knowledge-base/upload")
+def upload_knowledge_base_file():
+    uploaded_file = request.files.get("file")
+    if uploaded_file is None:
+        return jsonify({"error": "file is required"}), 400
+
+    original_name = str(uploaded_file.filename or "").strip()
+    if not original_name:
+        return jsonify({"error": "filename is required"}), 400
+
+    file_bytes = uploaded_file.read()
+    if not file_bytes:
+        return jsonify({"error": "uploaded file is empty"}), 400
+
+    if not original_name.lower().endswith(".pdf"):
+        return jsonify({"error": "only PDF files are supported"}), 400
+
+    if not file_bytes.startswith(PDF_HEADER):
+        return jsonify({"error": "uploaded file is not a valid PDF"}), 400
+
+    stored_path, action = _store_pdf_in_knowledge_base(file_bytes, original_name)
+
+    session_id = build_session_id(
+        chat_type=str(request.form.get("chatType", "")),
+        chat_id=request.form.get("chatId"),
+        user_id=str(request.form.get("userId", "")),
+    )
+    user_marker = f"[上传PDF] {stored_path.name}"
+    assistant_reply = _build_upload_reply(stored_path.name, action)
+    save_turn(session_id, "user", user_marker)
+    save_turn(session_id, "assistant", assistant_reply)
+
+    return jsonify(
+        {
+            "reply": assistant_reply,
+            "fileName": stored_path.name,
+            "action": action,
+            "knowledgeBasePath": str(stored_path.relative_to(Path(__file__).resolve().parents[1])),
+        }
+    )
 
 
 if __name__ == "__main__":

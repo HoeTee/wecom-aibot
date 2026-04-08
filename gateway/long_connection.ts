@@ -17,6 +17,13 @@ type ChatResponse = {
   reply: string;
 };
 
+type UploadKnowledgeBaseResponse = {
+  reply: string;
+  fileName: string;
+  action: "added" | "replaced" | "unchanged";
+  knowledgeBasePath: string;
+};
+
 const botId = process.env.WECOM_BOT_ID;
 const secret = process.env.WECOM_BOT_SECRET;
 const backendBaseUrl = process.env.BACKEND_BASE_URL ?? "http://127.0.0.1:5000";
@@ -68,6 +75,45 @@ async function fetchReply(payload: ChatRequest): Promise<string> {
   return data.reply;
 }
 
+function buildChatRequest(frame: WsFrame, content: string): ChatRequest {
+  return {
+    reqId: frame.headers?.req_id ?? "",
+    msgId: frame.body?.msgid ?? "",
+    chatId: frame.body?.chatid,
+    userId: frame.body?.from?.userid ?? "",
+    chatType: frame.body?.chattype ?? "single",
+    content,
+  };
+}
+
+async function uploadKnowledgeBasePdf(payload: ChatRequest, buffer: Buffer, filename: string): Promise<string> {
+  const form = new FormData();
+  form.append("reqId", payload.reqId);
+  form.append("msgId", payload.msgId);
+  if (payload.chatId) {
+    form.append("chatId", payload.chatId);
+  }
+  form.append("userId", payload.userId);
+  form.append("chatType", payload.chatType);
+  form.append("file", new Blob([new Uint8Array(buffer)], { type: "application/pdf" }), filename);
+
+  const response = await fetch(`${backendBaseUrl}/knowledge-base/upload`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Backend upload failed: ${response.status} ${text}`);
+  }
+
+  const data = (await response.json()) as UploadKnowledgeBaseResponse;
+  if (!data.reply) {
+    throw new Error("Backend upload response did not contain reply");
+  }
+  return data.reply;
+}
+
 wsClient.connect();
 
 wsClient.on("authenticated", () => {
@@ -84,14 +130,7 @@ wsClient.on("message.text", async (frame: WsFrame) => {
     return;
   }
 
-  const payload: ChatRequest = {
-    reqId: frame.headers?.req_id ?? "",
-    msgId: frame.body?.msgid ?? "",
-    chatId: frame.body?.chatid,
-    userId: frame.body?.from?.userid ?? "",
-    chatType: frame.body?.chattype ?? "single",
-    content,
-  };
+  const payload = buildChatRequest(frame, content);
 
   const streamId = generateReqId("stream");
   void tryReplyStream(frame, streamId, "Working on it...", false);
@@ -105,6 +144,36 @@ wsClient.on("message.text", async (frame: WsFrame) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error("Failed to process message:", message);
+    await tryReplyStream(frame, streamId, `Request failed: ${message}`, true);
+  }
+});
+
+wsClient.on("message.file", async (frame: WsFrame) => {
+  const fileUrl = frame.body?.file?.url;
+  const aesKey = frame.body?.file?.aeskey;
+  if (!fileUrl) {
+    return;
+  }
+
+  const payload = buildChatRequest(frame, `[上传文件] ${frame.body?.msgid ?? ""}`);
+  const streamId = generateReqId("stream");
+  void tryReplyStream(frame, streamId, "Receiving PDF...", false);
+
+  try {
+    const { buffer, filename } = await wsClient.downloadFile(fileUrl, aesKey);
+    const resolvedName = (filename ?? `${payload.msgId || "uploaded"}.pdf`).trim();
+    if (!resolvedName.toLowerCase().endsWith(".pdf")) {
+      throw new Error("Only PDF files can be added to the knowledge base");
+    }
+
+    const reply = await uploadKnowledgeBasePdf(payload, buffer, resolvedName);
+    const delivered = await tryReplyStream(frame, streamId, reply, true);
+    if (!delivered) {
+      console.error("Upload reply was not acknowledged by WeCom");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("Failed to process file message:", message);
     await tryReplyStream(frame, streamId, `Request failed: ${message}`, true);
   }
 });

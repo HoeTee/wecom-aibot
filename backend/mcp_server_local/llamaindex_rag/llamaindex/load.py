@@ -27,7 +27,7 @@ class LlamaIndexLoader:
     def _pdf_files(self, file_dir: Path | None = None) -> list[Path]: 
         target_dir = self.data_dir if file_dir is None else Path(file_dir).resolve()
         return sorted(
-            [pdf for pdf in target_dir.iterdir() if pdf.is_file() and pdf.suffix.lower() == ".pdf"]
+            [pdf for pdf in target_dir.rglob("*.pdf") if pdf.is_file()]
         )
 
     def _pdf_file_map(self, file_dir: Path | None = None) -> dict[str, Path]:
