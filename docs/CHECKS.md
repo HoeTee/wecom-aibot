@@ -12,7 +12,18 @@
 
 - HE 过程本身尽量自动化完成
 - human review 不参与每一轮迭代
-- human review 只在一轮代码收敛后，检查最终产品效果
+- human review 只在一轮代码和规则收敛后，检查最终产品效果
+
+## 自动检查的分层
+
+当前检查体系分三层：
+
+1. `hook`
+   - 自动记录 route / state / tool / output
+2. `guard`
+   - 在运行时尽量阻止明显错误
+3. `evaluator`
+   - 在运行后自动判断是否通过
 
 ## flow_trace
 
@@ -24,7 +35,34 @@
 - 单次运行先落 JSON
 - 后续由 maintenance 汇总和清理，不做永久无限堆积
 
-默认必须包含这些字段：
+### 顶层结构
+
+`flow_trace.json` 默认采用：
+
+- `metadata`
+- `events`
+
+### metadata
+
+默认至少包含：
+
+- `scenario_id`
+- `run_id`
+- `session_id`
+- `git_commit`
+- `prompt_version`
+
+### events
+
+事件必须保留真实发生顺序。
+
+每条 event 默认必须包含：
+
+- `timestamp`
+- `layer_at_event`
+- `event`
+
+此外，当前默认必须覆盖这些关键字段：
 
 - `route_selected`
 - `route_reason`
@@ -34,15 +72,22 @@
 - `clarify_needed`
 - `stop_reason`
 
-### 字段粒度
+### 字段要求
 
 #### `route_selected`
 
 必须明确写出这次请求最终走了哪条路。
 
+命名采用两层：
+
+- `code`
+- `detail`
+
 #### `route_reason`
 
 必须记录为什么选了这条路。
+
+默认是原因列表，而不是单条字符串。
 
 #### `selected_target`
 
@@ -54,17 +99,33 @@
 - 主标识
 - 简短显示名
 
+如果没有选中任何对象，也不直接写 `null`；应保留空对象并写明原因。
+
 #### `guard_hit`
 
-默认记录命中的 guard 名称列表。
+默认记录命中的 guard 列表。
+
+命名采用两层：
+
+- `code`
+- `detail`
 
 #### `tool_called`
 
+每次调用 tool 时都应作为一条独立事件记录，而不是最后合并成一个总列表字段。
+
 默认记录：
 
-- tool 名
+- `tool_name`
 - 参数摘要
 - 结果摘要
+- `result_status`
+
+其中 `result_status` 至少区分：
+
+- `success`
+- `failure`
+- `partial`
 
 这里用摘要，不记录全量原文。
 
@@ -72,9 +133,19 @@
 
 必须明确标记这次是否进入澄清分支。
 
+默认包含：
+
+- 是否需要澄清
+- `clarify_reason`
+
 #### `stop_reason`
 
 必须写明这次流程为什么在这里结束。
+
+默认包含：
+
+- 两层命名：`code` / `detail`
+- 最后停在哪一层
 
 ## 自动检查优先
 
@@ -149,21 +220,32 @@
 
 evaluator 默认自动执行。
 
-输出结果默认包括：
+### 输出结构
+
+默认输出：
 
 - `pass` / `fail`
 - `failed_checks`
 - 每个失败项的简短原因
+- `suggested_fix_layer`
 
-### 输出层次
+其中：
 
-#### 1. 每个 scenario 单独输出
+- `suggested_fix_layer` 默认包含主层和次层
 
-每个场景都要有自己的检查结果。
+### `failed_checks`
 
-#### 2. 额外总 summary
+命名采用两层：
 
-除单场景结果外，还应输出一份总 summary。
+- `code`：抽象类
+- `detail`：业务化细项
+
+### 场景结果与总结果
+
+evaluator 默认既输出：
+
+1. 每个 scenario 的单独结果
+2. 一份总 summary
 
 推荐位置：
 
@@ -174,13 +256,15 @@ evaluator 默认自动执行。
 
 layer checks 也属于自动检查。
 
-当前优先级：
+### 当前优先级
+
+以下三类都重要，但当前第一优先级是：
 
 1. 下层反向 import 上层
 2. production 代码 import `evals/*`
 3. orchestration 直接依赖 tool implementation
 
-第一阶段策略：
+### 第一阶段策略
 
 - 直接 hard fail
 - 同时产出结构化报告
@@ -189,14 +273,27 @@ layer checks 也属于自动检查。
 
 - `evals/runs/<run_id>/layer_checks.json`
 
-报告默认包含：
+### 报告内容
+
+默认包含：
 
 - 违反了哪条规则
 - 哪个文件依赖了哪个文件
+- `suggested_refactor_target`
+
+其中 `suggested_refactor_target` 默认包含：
+
+- 主目标
+- 备选目标
+
+每个目标都写：
+
+- 层名
+- 建议目录
 
 ## 软质量项
 
-以下项默认也应尽量自动检查，但最终产品裁决仍由 human reviewer 完成：
+以下项也应尽量自动检查，但最终产品裁决仍由 human reviewer 完成：
 
 ### 1. 文档内容质量
 
@@ -207,7 +304,7 @@ layer checks 也属于自动检查。
 - 占位符
 - 重复段落
 
-human reviewer 最后判断：
+最终 human reviewer 判断：
 
 - 是否能交付
 - 是否满足真实需求
@@ -235,17 +332,6 @@ human review 不是每轮 HE 的常规步骤。
 
 1. coding agent 自动修改
 2. 自动跑固定 scenarios
-3. 自动跑 gates / evaluator
+3. 自动跑 guards / evaluator
 4. 代码和规则收敛后
 5. 再由 human reviewer 看最终文档和最终体验
-
-## 当前方向
-
-后续检查体系分三层：
-
-1. hook
-   - 自动记录 route / state / tool / output
-2. guard
-   - 在运行时尽量阻止明显错误
-3. evaluator
-   - 在运行后自动判断是否通过
