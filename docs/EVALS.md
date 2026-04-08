@@ -17,6 +17,7 @@
 - 场景定义：`evals/scenarios/*`
 - 人工 review 模板：`evals/review_template.md`
 - 运行产物：`evals/runs/`，已加入 `.gitignore`
+- 总报告：`evals/reports/*`
 
 ## 当前落地
 
@@ -63,12 +64,17 @@ python scripts/run_eval_case.py --scenario-id upload_same_name_pdf_update_notice
 - `metadata.json`
 - `user_request.txt`
 - `assistant_reply.txt`
+- `flow_trace.json`
 - `tool_trace.json`
 - `rag_query.json`
 - `doc_binding.json`
 - `uploaded_file.json`
 - `written_doc_content.md`
 - `gate_results.json`
+
+如果启用了 layer checks，还应额外导出：
+
+- `evals/runs/<run_id>/layer_checks.json`
 
 ## 当前 workflow
 
@@ -77,6 +83,29 @@ python scripts/run_eval_case.py --scenario-id upload_same_name_pdf_update_notice
 3. 运行 `scripts/run_eval_case.py`
 4. 先看 `gate_results.json`
 5. gates 全过后，再做最终 human review
+
+## maintenance
+
+maintenance 不假设后台自动运行。
+
+当前默认方式是：
+
+- 每次主链路发生重要修改后，由 coding agent 主动建议执行一次
+- 由用户决定是否生成 maintenance summary
+
+maintenance summary 建议按主题命名，位置在：
+
+- `evals/reports/maintenance/*.md`
+- `evals/reports/maintenance/*.json`
+
+给人看的 summary 保持结构化但不过分详细。
+
+推荐结构：
+
+1. 问题
+2. 影响层
+3. 建议修改点
+4. 相关场景
 
 ## 当前边界
 

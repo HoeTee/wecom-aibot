@@ -14,6 +14,68 @@
 - human review 不参与每一轮迭代
 - human review 只在一轮代码收敛后，检查最终产品效果
 
+## flow_trace
+
+`flow_trace` 属于自动检查的基础输入。
+
+当前要求：
+
+- 每次关键请求都应导出独立的 `flow_trace.json`
+- 单次运行先落 JSON
+- 后续由 maintenance 汇总和清理，不做永久无限堆积
+
+默认必须包含这些字段：
+
+- `route_selected`
+- `route_reason`
+- `selected_target`
+- `guard_hit`
+- `tool_called`
+- `clarify_needed`
+- `stop_reason`
+
+### 字段粒度
+
+#### `route_selected`
+
+必须明确写出这次请求最终走了哪条路。
+
+#### `route_reason`
+
+必须记录为什么选了这条路。
+
+#### `selected_target`
+
+默认记录对象摘要，而不是只记单个主标识。
+
+建议至少包含：
+
+- `target_type`
+- 主标识
+- 简短显示名
+
+#### `guard_hit`
+
+默认记录命中的 guard 名称列表。
+
+#### `tool_called`
+
+默认记录：
+
+- tool 名
+- 参数摘要
+- 结果摘要
+
+这里用摘要，不记录全量原文。
+
+#### `clarify_needed`
+
+必须明确标记这次是否进入澄清分支。
+
+#### `stop_reason`
+
+必须写明这次流程为什么在这里结束。
+
 ## 自动检查优先
 
 以下项默认属于自动检查：
@@ -82,6 +144,55 @@
 1. 先根据路由规则和流程规则确定预期路径
 2. 再确定允许的 tool 集合
 3. 检查实际 tool 调用是否偏离
+
+## evaluator
+
+evaluator 默认自动执行。
+
+输出结果默认包括：
+
+- `pass` / `fail`
+- `failed_checks`
+- 每个失败项的简短原因
+
+### 输出层次
+
+#### 1. 每个 scenario 单独输出
+
+每个场景都要有自己的检查结果。
+
+#### 2. 额外总 summary
+
+除单场景结果外，还应输出一份总 summary。
+
+推荐位置：
+
+- `evals/reports/<run_id>.md`
+- `evals/reports/<run_id>.json`
+
+## layer checks
+
+layer checks 也属于自动检查。
+
+当前优先级：
+
+1. 下层反向 import 上层
+2. production 代码 import `evals/*`
+3. orchestration 直接依赖 tool implementation
+
+第一阶段策略：
+
+- 直接 hard fail
+- 同时产出结构化报告
+
+推荐位置：
+
+- `evals/runs/<run_id>/layer_checks.json`
+
+报告默认包含：
+
+- 违反了哪条规则
+- 哪个文件依赖了哪个文件
 
 ## 软质量项
 
