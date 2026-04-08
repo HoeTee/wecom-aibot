@@ -1,0 +1,18 @@
+id: upload_pdf_add_to_knowledge_base
+goal: 用户先在会话里上传 PDF，再发文本要求“把这份文档添加到知识库”时，系统应直接确认已入库，而不是再次索要文件。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+  - turns/turn_2.txt
+scenario_gates:
+  - id: uploaded_pdf_must_be_recorded
+    description: 上传 PDF 后，session 必须有结构化上传文件状态。
+  - id: followup_add_to_kb_must_not_request_file_again
+    description: 已经收到并入库 PDF 后，后续文本确认不应再次索要文件或要求重新上传。
+  - id: followup_add_to_kb_must_ack_existing_upload
+    description: 后续文本确认应明确说明刚上传的 PDF 已加入知识库或已在知识库中。
+artifact_focus:
+  - user_request
+  - assistant_reply
+  - uploaded_file
+  - gate_results

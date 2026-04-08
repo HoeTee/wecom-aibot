@@ -83,6 +83,16 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(session_id, doc_id)
             );
+
+            CREATE TABLE IF NOT EXISTS session_uploaded_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                stored_path TEXT NOT NULL,
+                file_sha256 TEXT NOT NULL,
+                upload_action TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         conn.commit()
@@ -213,6 +223,59 @@ def upsert_session_doc(
         conn.commit()
 
 
+def save_uploaded_file(
+    session_id: str,
+    file_name: str,
+    stored_path: str,
+    file_sha256: str,
+    upload_action: str,
+) -> None:
+    session_id = str(session_id or "").strip()
+    file_name = str(file_name or "").strip()
+    stored_path = str(stored_path or "").strip()
+    file_sha256 = str(file_sha256 or "").strip()
+    upload_action = str(upload_action or "").strip()
+    if not session_id or not file_name or not stored_path or not file_sha256 or not upload_action:
+        return
+
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO session_uploaded_files (
+                session_id,
+                file_name,
+                stored_path,
+                file_sha256,
+                upload_action
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (session_id, file_name, stored_path, file_sha256, upload_action),
+        )
+        conn.commit()
+
+
+def latest_uploaded_file(session_id: str, within_minutes: int = 30) -> dict[str, Any] | None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT file_name, stored_path, file_sha256, upload_action, created_at
+            FROM session_uploaded_files
+            WHERE session_id = ?
+              AND created_at >= datetime('now', ?)
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (session_id, f"-{int(within_minutes)} minute"),
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
 def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
     session_id = str(session_id or "").strip()
     if not session_id:
@@ -239,6 +302,18 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
               AND role = 'user'
               AND created_at >= datetime('now', '-7 day')
             ORDER BY created_at DESC
+            LIMIT 3
+            """,
+            (session_id,),
+        ).fetchall()
+
+        uploaded_files = conn.execute(
+            """
+            SELECT file_name, stored_path, upload_action, created_at
+            FROM session_uploaded_files
+            WHERE session_id = ?
+              AND created_at >= datetime('now', '-7 day')
+            ORDER BY id DESC
             LIMIT 3
             """,
             (session_id,),
@@ -271,6 +346,16 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
         for row in reversed(user_turns):
             turn_lines.append(f"- user: {_short_text(row['content'], limit=300)}")
         sections.append("\n".join(turn_lines))
+
+    if uploaded_files:
+        upload_lines = ["Recent uploaded files:"]
+        for row in reversed(uploaded_files):
+            upload_lines.append(
+                f"- file_name={row['file_name']}; "
+                f"stored_path={row['stored_path']}; "
+                f"action={row['upload_action']}"
+            )
+        sections.append("\n".join(upload_lines))
 
     if not sections:
         return ""

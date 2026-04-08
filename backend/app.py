@@ -11,9 +11,11 @@ from backend.memory import (
     build_session_id,
     extract_doc_binding,
     init_db,
+    latest_uploaded_file,
     load_memory_context,
     save_tool_call,
     save_turn,
+    save_uploaded_file,
     upsert_session_doc,
 )
 
@@ -80,6 +82,58 @@ def _build_upload_reply(stored_name: str, action: str) -> str:
     return f"PDF `{stored_name}` 已加入知识库。后续检索会自动纳入它。"
 
 
+def is_add_to_knowledge_base_request(content: str) -> bool:
+    text = str(content or "").strip()
+    if not text:
+        return False
+
+    knowledge_tokens = ("知识库", "知识源", "知识源库")
+    add_tokens = ("加入", "添加", "放到", "纳入", "导入")
+    file_tokens = (
+        "这份文档",
+        "这个文件",
+        "这份文件",
+        "刚上传的文件",
+        "刚才上传的文件",
+        "刚上传的pdf",
+        "刚上传的PDF",
+        "这个pdf",
+        "这个PDF",
+        "文档",
+        "文件",
+        "pdf",
+        "PDF",
+    )
+    generation_tokens = ("总结", "摘要", "生成", "分析", "写一份", "文档必须包含")
+
+    if not any(token in text for token in knowledge_tokens):
+        return False
+    if not any(token in text for token in add_tokens):
+        return False
+    if not any(token in text for token in file_tokens):
+        return False
+    if any(token in text for token in generation_tokens):
+        return False
+    return True
+
+
+def maybe_short_circuit_upload_followup(session_id: str, content: str) -> str | None:
+    if not is_add_to_knowledge_base_request(content):
+        return None
+
+    latest_upload = latest_uploaded_file(session_id)
+    if not latest_upload:
+        return None
+
+    file_name = str(latest_upload["file_name"])
+    action = str(latest_upload["upload_action"])
+    if action == "unchanged":
+        return f"刚上传的 PDF `{file_name}` 已经在知识库里了，不需要重复添加。"
+    if action == "replaced":
+        return f"刚上传的 PDF `{file_name}` 已经更新到知识库了。"
+    return f"刚上传的 PDF `{file_name}` 已经加入知识库了。"
+
+
 async def run_agent(payload: dict) -> str:
     mcp_runtime = None
     content = str(payload.get("content", "")).strip()
@@ -88,6 +142,13 @@ async def run_agent(payload: dict) -> str:
         chat_id=payload.get("chatId"),
         user_id=str(payload.get("userId", "")),
     )
+
+    short_circuit_reply = maybe_short_circuit_upload_followup(session_id, content)
+    if short_circuit_reply:
+        save_turn(session_id, "user", content)
+        save_turn(session_id, "assistant", short_circuit_reply)
+        return short_circuit_reply
+
     memory_context = load_memory_context(
         session_id,
         include_bound_doc=not is_fresh_document_request(content),
@@ -176,6 +237,13 @@ def upload_knowledge_base_file():
         chat_type=str(request.form.get("chatType", "")),
         chat_id=request.form.get("chatId"),
         user_id=str(request.form.get("userId", "")),
+    )
+    save_uploaded_file(
+        session_id=session_id,
+        file_name=stored_path.name,
+        stored_path=str(stored_path.relative_to(Path(__file__).resolve().parents[1])),
+        file_sha256=_sha256_bytes(file_bytes),
+        upload_action=action,
     )
     user_marker = f"[上传PDF] {stored_path.name}"
     assistant_reply = _build_upload_reply(stored_path.name, action)
