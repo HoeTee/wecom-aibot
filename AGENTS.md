@@ -16,6 +16,10 @@
 - [docs/REPLY_STYLE.md](/C:/Users/18014/wecom-aibot/docs/REPLY_STYLE.md)
 - [docs/MCP_TOOLS.md](/C:/Users/18014/wecom-aibot/docs/MCP_TOOLS.md)
 - [docs/MEMORY.md](/C:/Users/18014/wecom-aibot/docs/MEMORY.md)
+- [docs/ARCHITECTURE.md](/C:/Users/18014/wecom-aibot/docs/ARCHITECTURE.md)
+- [docs/ROUTING_RULES.md](/C:/Users/18014/wecom-aibot/docs/ROUTING_RULES.md)
+- [docs/FLOWS.md](/C:/Users/18014/wecom-aibot/docs/FLOWS.md)
+- [docs/CHECKS.md](/C:/Users/18014/wecom-aibot/docs/CHECKS.md)
 - [docs/EVALS.md](/C:/Users/18014/wecom-aibot/docs/EVALS.md)
 - [evals/gates/global.yaml](/C:/Users/18014/wecom-aibot/evals/gates/global.yaml)
 
