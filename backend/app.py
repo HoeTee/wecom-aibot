@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import asyncio
 import hashlib
 from pathlib import Path
+from typing import Any
 
 from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
@@ -10,9 +13,11 @@ from backend.mcp_client import MCPHost, load_mcp_server_configs_from_env
 from backend.memory import (
     build_session_id,
     extract_doc_binding,
+    generate_request_id,
     init_db,
     latest_uploaded_file,
     load_memory_context,
+    save_flow_event,
     save_tool_call,
     save_turn,
     save_uploaded_file,
@@ -22,6 +27,7 @@ from backend.memory import (
 
 app = Flask(__name__)
 init_db()
+
 DEFAULT_SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "system" / "assistant_v1.md"
 KNOWLEDGE_BASE_PAPER_DIR = Path(__file__).resolve().parents[1] / "knowledge_base" / "papers"
 KNOWLEDGE_BASE_UPLOAD_DIR = KNOWLEDGE_BASE_PAPER_DIR / "uploads"
@@ -66,6 +72,36 @@ def _relative_project_path(path: Path) -> str:
     return str(path.relative_to(Path(__file__).resolve().parents[1]))
 
 
+def _build_selected_target(target_type: str, primary_id: str | None, display_name: str | None, clear_reason: str | None = None) -> dict[str, Any]:
+    return {
+        "target_type": target_type,
+        "primary_id": primary_id,
+        "display_name": display_name,
+        "clear_reason": clear_reason,
+    }
+
+
+def _build_route_payload(
+    route_code: str,
+    route_detail: str,
+    reasons: list[str],
+    selected_target: dict[str, Any],
+    guard_hits: list[dict[str, str]] | None = None,
+    clarify_needed: bool = False,
+    clarify_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "route_selected": {"code": route_code, "detail": route_detail},
+        "route_reason": reasons,
+        "selected_target": selected_target,
+        "guard_hit": guard_hits or [],
+        "clarify_needed": {
+            "needed": clarify_needed,
+            "clarify_reason": clarify_reason,
+        },
+    }
+
+
 def _store_pdf_in_knowledge_base(file_bytes: bytes, original_name: str) -> dict[str, str | None]:
     KNOWLEDGE_BASE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target_path = KNOWLEDGE_BASE_UPLOAD_DIR / _upload_storage_name(original_name)
@@ -108,19 +144,12 @@ def _store_pdf_in_knowledge_base(file_bytes: bytes, original_name: str) -> dict[
     }
 
 
-def _build_upload_reply(
-    file_name: str,
-    action: str,
-    matched_file_name: str | None = None,
-) -> str:
+def _build_upload_reply(file_name: str, action: str, matched_file_name: str | None = None) -> str:
     if action == "unchanged":
         return f"PDF `{file_name}` 已经在知识库里了，文件名和内容都重复，未再次写入。"
     if action == "duplicate_content":
         if matched_file_name:
-            return (
-                f"PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，"
-                "未重复加入知识库。"
-            )
+            return f"PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，未重复加入知识库。"
         return f"PDF `{file_name}` 与知识库中的现有文件内容完全一致，未重复加入知识库。"
     if action == "replaced":
         return f"检测到同名 PDF `{file_name}` 已存在，已用新上传内容更新知识库中的同名文件。"
@@ -162,7 +191,7 @@ def is_add_to_knowledge_base_request(content: str) -> bool:
     return True
 
 
-def maybe_short_circuit_upload_followup(session_id: str, content: str) -> str | None:
+def maybe_short_circuit_upload_followup(session_id: str, content: str) -> tuple[str, dict[str, Any]] | None:
     if not is_add_to_knowledge_base_request(content):
         return None
 
@@ -173,39 +202,112 @@ def maybe_short_circuit_upload_followup(session_id: str, content: str) -> str | 
     file_name = str(latest_upload["file_name"])
     action = str(latest_upload["upload_action"])
     matched_file_name = str(latest_upload.get("matched_file_name") or "").strip() or None
+
     if action == "unchanged":
-        return f"刚上传的 PDF `{file_name}` 已经在知识库里了，不需要重复添加。"
-    if action == "duplicate_content":
+        reply = f"刚上传的 PDF `{file_name}` 已经在知识库里了，不需要重复添加。"
+    elif action == "duplicate_content":
         if matched_file_name:
-            return f"刚上传的 PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，未重复加入。"
-        return f"刚上传的 PDF `{file_name}` 与知识库中的已有文件内容完全一致，未重复加入。"
-    if action == "replaced":
-        return f"刚上传的 PDF `{file_name}` 已经更新到知识库了。"
-    return f"刚上传的 PDF `{file_name}` 已经加入知识库了。"
+            reply = f"刚上传的 PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，未重复加入。"
+        else:
+            reply = f"刚上传的 PDF `{file_name}` 与知识库中的已有文件内容完全一致，未重复加入。"
+    elif action == "replaced":
+        reply = f"刚上传的 PDF `{file_name}` 已经更新到知识库了。"
+    else:
+        reply = f"刚上传的 PDF `{file_name}` 已经加入知识库了。"
+
+    payload = _build_route_payload(
+        route_code="short_circuit",
+        route_detail="upload_followup_confirmation",
+        reasons=["knowledge_base_followup_detected", "recent_uploaded_file_found"],
+        selected_target=_build_selected_target("uploaded_file", file_name, file_name),
+        guard_hits=[{"code": "upload_followup_guard", "detail": "ack_existing_upload"}],
+        clarify_needed=False,
+    )
+    return reply, payload
 
 
-async def run_agent(payload: dict) -> str:
+async def run_agent(payload: dict[str, Any]) -> str:
     mcp_runtime = None
     content = str(payload.get("content", "")).strip()
+    request_id = str(payload.get("requestId") or generate_request_id())
     session_id = build_session_id(
         chat_type=str(payload.get("chatType", "")),
         chat_id=payload.get("chatId"),
         user_id=str(payload.get("userId", "")),
     )
 
-    short_circuit_reply = maybe_short_circuit_upload_followup(session_id, content)
-    if short_circuit_reply:
-        save_turn(session_id, "user", content)
-        save_turn(session_id, "assistant", short_circuit_reply)
-        return short_circuit_reply
+    def emit_flow(layer_at_event: str, event_name: str, event_payload: dict[str, Any]) -> None:
+        save_flow_event(session_id, request_id, layer_at_event, event_name, event_payload)
+
+    emit_flow(
+        "entry",
+        "request_received",
+        {
+            "message_type": "text",
+            "content_preview": content[:200],
+        },
+    )
+
+    short_circuit = maybe_short_circuit_upload_followup(session_id, content)
+    if short_circuit:
+        reply, route_payload = short_circuit
+        emit_flow("orchestration", "route_selected", route_payload)
+        save_turn(session_id, "user", content, request_id=request_id)
+        save_turn(session_id, "assistant", reply, request_id=request_id)
+        emit_flow(
+            "entry",
+            "reply_generated",
+            {
+                "reply_type": "ack_existing_upload",
+                "reply_preview": reply[:200],
+            },
+        )
+        emit_flow(
+            "orchestration",
+            "stop_reason",
+            {
+                "code": "short_circuit",
+                "detail": "upload_followup_confirmation",
+                "layer": "orchestration",
+            },
+        )
+        return reply
+
+    include_bound_doc = not is_fresh_document_request(content)
+    route_detail = "fresh_document_request" if not include_bound_doc else "default_agent_flow"
+    route_reason = ["fresh_document_request"] if not include_bound_doc else ["default_text_message"]
+    emit_flow(
+        "orchestration",
+        "route_selected",
+        _build_route_payload(
+            route_code="agent_chat",
+            route_detail=route_detail,
+            reasons=route_reason,
+            selected_target=_build_selected_target(
+                "document" if include_bound_doc else "none",
+                None,
+                None,
+                clear_reason="fresh_document_request" if not include_bound_doc else "no_target_selected_at_route_time",
+            ),
+            clarify_needed=False,
+        ),
+    )
 
     memory_context = load_memory_context(
         session_id,
-        include_bound_doc=not is_fresh_document_request(content),
+        include_bound_doc=include_bound_doc,
+    )
+    emit_flow(
+        "policy_state",
+        "memory_loaded",
+        {
+            "include_bound_doc": include_bound_doc,
+            "has_memory_context": bool(memory_context),
+        },
     )
 
-    def on_tool_result(tool_name: str, args_dict: dict, result_text: str) -> None:
-        save_tool_call(session_id, tool_name, args_dict, result_text)
+    def on_tool_result(tool_name: str, args_dict: dict[str, Any], result_text: str) -> None:
+        save_tool_call(session_id, tool_name, args_dict, result_text, request_id=request_id)
         binding = extract_doc_binding(tool_name, args_dict, result_text)
         if not binding:
             return
@@ -216,15 +318,35 @@ async def run_agent(payload: dict) -> str:
             doc_name=binding["doc_name"],
             last_tool_name=tool_name,
             last_user_text=content,
+            request_id=request_id,
+        )
+        emit_flow(
+            "policy_state",
+            "doc_binding_updated",
+            {
+                "selected_target": _build_selected_target(
+                    "document",
+                    str(binding["doc_id"] or ""),
+                    binding["doc_name"] or binding["doc_url"] or "",
+                ),
+            },
         )
 
     try:
-        save_turn(session_id, "user", content)
+        save_turn(session_id, "user", content, request_id=request_id)
 
         server_configs = load_mcp_server_configs_from_env()
         if server_configs:
             mcp_runtime = MCPHost(server_configs)
             await mcp_runtime.connect_all()
+            emit_flow(
+                "tool_runtime",
+                "tool_runtime_ready",
+                {
+                    "tool_count": len(mcp_runtime.tools),
+                    "server_count": len(server_configs),
+                },
+            )
 
         agent = Agent(
             name="WeComBackendAgent",
@@ -232,10 +354,19 @@ async def run_agent(payload: dict) -> str:
             mcp_client=mcp_runtime,
             memory_context=memory_context,
             on_tool_result=on_tool_result,
+            on_flow_event=lambda event_name, event_payload: emit_flow("orchestration", event_name, event_payload),
         )
         reply = await agent.chat(content)
         reply = reply or "No response generated."
-        save_turn(session_id, "assistant", reply)
+        save_turn(session_id, "assistant", reply, request_id=request_id)
+        emit_flow(
+            "entry",
+            "reply_generated",
+            {
+                "reply_type": "assistant_final",
+                "reply_preview": reply[:200],
+            },
+        )
         return reply
     finally:
         if mcp_runtime:
@@ -255,8 +386,9 @@ def chat():
         return jsonify({"error": "content is required"}), 400
 
     try:
+        payload.setdefault("requestId", generate_request_id())
         reply = asyncio.run(run_agent(payload))
-        return jsonify({"reply": reply})
+        return jsonify({"reply": reply, "requestId": payload["requestId"]})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
@@ -281,6 +413,25 @@ def upload_knowledge_base_file():
     if not file_bytes.startswith(PDF_HEADER):
         return jsonify({"error": "uploaded file is not a valid PDF"}), 400
 
+    request_id = generate_request_id()
+    session_id = build_session_id(
+        chat_type=str(request.form.get("chatType", "")),
+        chat_id=request.form.get("chatId"),
+        user_id=str(request.form.get("userId", "")),
+    )
+
+    def emit_flow(layer_at_event: str, event_name: str, event_payload: dict[str, Any]) -> None:
+        save_flow_event(session_id, request_id, layer_at_event, event_name, event_payload)
+
+    emit_flow(
+        "entry",
+        "request_received",
+        {
+            "message_type": "file",
+            "file_name": original_name,
+        },
+    )
+
     store_result = _store_pdf_in_knowledge_base(file_bytes, original_name)
     file_name = str(store_result["file_name"] or "")
     stored_path = str(store_result["stored_path"] or "")
@@ -288,11 +439,6 @@ def upload_knowledge_base_file():
     matched_file_name = str(store_result.get("matched_file_name") or "").strip() or None
     matched_stored_path = str(store_result.get("matched_stored_path") or "").strip() or None
 
-    session_id = build_session_id(
-        chat_type=str(request.form.get("chatType", "")),
-        chat_id=request.form.get("chatId"),
-        user_id=str(request.form.get("userId", "")),
-    )
     save_uploaded_file(
         session_id=session_id,
         file_name=file_name,
@@ -301,15 +447,57 @@ def upload_knowledge_base_file():
         upload_action=action,
         matched_file_name=matched_file_name,
         matched_stored_path=matched_stored_path,
+        request_id=request_id,
     )
+
+    route_guard_hits: list[dict[str, str]] = []
+    if action == "unchanged":
+        route_guard_hits.append({"code": "duplicate_upload_guard", "detail": "same_name_same_content"})
+    elif action == "duplicate_content":
+        route_guard_hits.append({"code": "duplicate_upload_guard", "detail": "same_content_different_name"})
+    elif action == "replaced":
+        route_guard_hits.append({"code": "upload_update_guard", "detail": "same_name_content_updated"})
+
+    emit_flow(
+        "orchestration",
+        "route_selected",
+        _build_route_payload(
+            route_code="upload_ingest",
+            route_detail="pdf_upload_to_knowledge_base",
+            reasons=["pdf_file_message"],
+            selected_target=_build_selected_target("uploaded_file", file_name, file_name),
+            guard_hits=route_guard_hits,
+            clarify_needed=False,
+        ),
+    )
+
     user_marker = f"[上传PDF] {file_name}"
     assistant_reply = _build_upload_reply(file_name, action, matched_file_name)
-    save_turn(session_id, "user", user_marker)
-    save_turn(session_id, "assistant", assistant_reply)
+    save_turn(session_id, "user", user_marker, request_id=request_id)
+    save_turn(session_id, "assistant", assistant_reply, request_id=request_id)
+
+    emit_flow(
+        "entry",
+        "reply_generated",
+        {
+            "reply_type": "upload_ack",
+            "reply_preview": assistant_reply[:200],
+        },
+    )
+    emit_flow(
+        "orchestration",
+        "stop_reason",
+        {
+            "code": "upload_complete",
+            "detail": action,
+            "layer": "orchestration",
+        },
+    )
 
     return jsonify(
         {
             "reply": assistant_reply,
+            "requestId": request_id,
             "fileName": file_name,
             "action": action,
             "knowledgeBasePath": stored_path,

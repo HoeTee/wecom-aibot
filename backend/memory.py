@@ -5,6 +5,7 @@ import re
 import sqlite3
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -23,10 +24,7 @@ def _connect() -> sqlite3.Connection:
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    columns = {
-        row["name"]
-        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
-    }
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column in columns:
         return
     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -68,6 +66,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS conversation_turns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
+                request_id TEXT,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -76,6 +75,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS tool_calls (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
+                request_id TEXT,
                 tool_name TEXT NOT NULL,
                 args_json TEXT NOT NULL,
                 result_excerpt TEXT NOT NULL,
@@ -85,6 +85,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS session_docs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
+                request_id TEXT,
                 doc_id TEXT NOT NULL,
                 doc_url TEXT,
                 doc_name TEXT,
@@ -97,6 +98,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS session_uploaded_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
+                request_id TEXT,
                 file_name TEXT NOT NULL,
                 stored_path TEXT NOT NULL,
                 file_sha256 TEXT NOT NULL,
@@ -105,11 +107,29 @@ def init_db() -> None:
                 matched_stored_path TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS flow_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                layer_at_event TEXT NOT NULL,
+                event_name TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
+        _ensure_column(conn, "conversation_turns", "request_id", "TEXT")
+        _ensure_column(conn, "tool_calls", "request_id", "TEXT")
+        _ensure_column(conn, "session_docs", "request_id", "TEXT")
+        _ensure_column(conn, "session_uploaded_files", "request_id", "TEXT")
         _ensure_column(conn, "session_uploaded_files", "matched_file_name", "TEXT")
         _ensure_column(conn, "session_uploaded_files", "matched_stored_path", "TEXT")
         conn.commit()
+
+
+def generate_request_id() -> str:
+    return uuid4().hex
 
 
 def build_session_id(chat_type: str, chat_id: str | None, user_id: str) -> str:
@@ -126,41 +146,81 @@ def build_session_id(chat_type: str, chat_id: str | None, user_id: str) -> str:
     return "anonymous"
 
 
-def save_turn(session_id: str, role: str, content: str) -> None:
+def save_turn(session_id: str, role: str, content: str, request_id: str | None = None) -> None:
     session_id = str(session_id or "").strip()
     role = str(role or "").strip()
     content = str(content or "").strip()
+    request_id = str(request_id or "").strip() or None
     if not session_id or not role or not content:
         return
 
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO conversation_turns (session_id, role, content)
-            VALUES (?, ?, ?)
+            INSERT INTO conversation_turns (session_id, request_id, role, content)
+            VALUES (?, ?, ?, ?)
             """,
-            (session_id, role, content),
+            (session_id, request_id, role, content),
         )
         conn.commit()
 
 
-def save_tool_call(session_id: str, tool_name: str, args_dict: dict[str, Any], result_text: str) -> None:
+def save_tool_call(
+    session_id: str,
+    tool_name: str,
+    args_dict: dict[str, Any],
+    result_text: str,
+    request_id: str | None = None,
+) -> None:
     session_id = str(session_id or "").strip()
     tool_name = str(tool_name or "").strip()
+    request_id = str(request_id or "").strip() or None
     if not session_id or not tool_name:
         return
 
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO tool_calls (session_id, tool_name, args_json, result_excerpt)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO tool_calls (session_id, request_id, tool_name, args_json, result_excerpt)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 session_id,
+                request_id,
                 tool_name,
-                _short_text(_json_dumps(args_dict)),
+                _json_dumps(args_dict),
                 _short_text(result_text),
+            ),
+        )
+        conn.commit()
+
+
+def save_flow_event(
+    session_id: str,
+    request_id: str,
+    layer_at_event: str,
+    event_name: str,
+    payload: dict[str, Any],
+) -> None:
+    session_id = str(session_id or "").strip()
+    request_id = str(request_id or "").strip()
+    layer_at_event = str(layer_at_event or "").strip()
+    event_name = str(event_name or "").strip()
+    if not session_id or not request_id or not layer_at_event or not event_name:
+        return
+
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO flow_events (session_id, request_id, layer_at_event, event_name, payload_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                request_id,
+                layer_at_event,
+                event_name,
+                _json_dumps(payload),
             ),
         )
         conn.commit()
@@ -198,11 +258,13 @@ def upsert_session_doc(
     doc_name: str | None,
     last_tool_name: str,
     last_user_text: str,
+    request_id: str | None = None,
 ) -> None:
     session_id = str(session_id or "").strip()
     doc_id = str(doc_id or "").strip()
     last_tool_name = str(last_tool_name or "").strip()
     last_user_text = str(last_user_text or "").strip()
+    request_id = str(request_id or "").strip() or None
     if not session_id or not doc_id or not last_tool_name:
         return
 
@@ -211,14 +273,16 @@ def upsert_session_doc(
             """
             INSERT INTO session_docs (
                 session_id,
+                request_id,
                 doc_id,
                 doc_url,
                 doc_name,
                 last_tool_name,
                 last_user_text
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id, doc_id) DO UPDATE SET
+                request_id = excluded.request_id,
                 doc_url = COALESCE(excluded.doc_url, session_docs.doc_url),
                 doc_name = COALESCE(excluded.doc_name, session_docs.doc_name),
                 last_tool_name = excluded.last_tool_name,
@@ -227,6 +291,7 @@ def upsert_session_doc(
             """,
             (
                 session_id,
+                request_id,
                 doc_id,
                 doc_url,
                 doc_name,
@@ -245,12 +310,14 @@ def save_uploaded_file(
     upload_action: str,
     matched_file_name: str | None = None,
     matched_stored_path: str | None = None,
+    request_id: str | None = None,
 ) -> None:
     session_id = str(session_id or "").strip()
     file_name = str(file_name or "").strip()
     stored_path = str(stored_path or "").strip()
     file_sha256 = str(file_sha256 or "").strip()
     upload_action = str(upload_action or "").strip()
+    request_id = str(request_id or "").strip() or None
     if not session_id or not file_name or not stored_path or not file_sha256 or not upload_action:
         return
 
@@ -259,6 +326,7 @@ def save_uploaded_file(
             """
             INSERT INTO session_uploaded_files (
                 session_id,
+                request_id,
                 file_name,
                 stored_path,
                 file_sha256,
@@ -266,10 +334,11 @@ def save_uploaded_file(
                 matched_file_name,
                 matched_stored_path
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
+                request_id,
                 file_name,
                 stored_path,
                 file_sha256,
@@ -290,6 +359,7 @@ def latest_uploaded_file(session_id: str, within_minutes: int = 30) -> dict[str,
         row = conn.execute(
             """
             SELECT
+                request_id,
                 file_name,
                 stored_path,
                 file_sha256,
@@ -342,8 +412,8 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
 
         uploaded_files = conn.execute(
             """
-            SELECT file_name, stored_path, upload_action, created_at
-                 , matched_file_name, matched_stored_path
+            SELECT file_name, stored_path, upload_action, created_at,
+                   matched_file_name, matched_stored_path
             FROM session_uploaded_files
             WHERE session_id = ?
               AND created_at >= datetime('now', '-7 day')

@@ -49,6 +49,9 @@ class ToolRuntime(Protocol):
         ...
 
 
+FlowCallback = Callable[[str, dict[str, Any]], None]
+
+
 class Agent:
     def __init__(
         self,
@@ -60,6 +63,7 @@ class Agent:
         debug: bool = False,
         memory_context: str = "",
         on_tool_result: Callable[[str, dict[str, Any], str], None] | None = None,
+        on_flow_event: FlowCallback | None = None,
     ) -> None:
         self.settings = settings or Settings()
         self.client = AsyncOpenAI(
@@ -75,6 +79,7 @@ class Agent:
         self.max_context_tokens = self.settings.max_context_tokens
         self.max_result_tokens = self.settings.max_result_tokens
         self.on_tool_result = on_tool_result
+        self.on_flow_event = on_flow_event
 
         self.token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self.tool_call_count = 0
@@ -83,6 +88,14 @@ class Agent:
             self.messages.append({"role": "system", "content": system_prompt})
         if memory_context:
             self.messages.append({"role": "system", "content": memory_context})
+
+    def _emit_flow(self, event_name: str, payload: dict[str, Any]) -> None:
+        if not self.on_flow_event:
+            return
+        try:
+            self.on_flow_event(event_name, payload)
+        except Exception as exc:
+            self._log(f"Failed to record flow event '{event_name}': {exc}")
 
     def _log(self, message: str) -> None:
         if self.debug:
@@ -200,23 +213,34 @@ class Agent:
             return None
 
         if "..." in content:
-            return "Document content validation failed: placeholder text '...' is not allowed."
+            return "文档内容校验失败：不允许写入占位符 `...`。"
 
         if self._user_requested_structured_summary():
             required_sections = ("背景", "每篇论文摘要", "横向对比", "结论与建议")
             missing_sections = [section for section in required_sections if section not in content]
             if missing_sections:
-                return (
-                    "Document content validation failed: missing required sections: "
-                    + ", ".join(missing_sections)
-                )
+                return "文档内容校验失败：缺少必需章节：" + "、".join(missing_sections)
 
         if not self._user_requested_table():
             forbidden_table_markers = ("## 5.", "### 5.", "技术对比表")
             if any(marker in content for marker in forbidden_table_markers):
-                return "Document content validation failed: comparison table content is not allowed in this turn."
+                return "文档内容校验失败：当前轮次不允许提前生成对比表。"
 
         return None
+
+    def _summarize_args(self, args_dict: dict[str, Any]) -> dict[str, Any]:
+        summary: dict[str, Any] = {}
+        for key, value in args_dict.items():
+            if key == "content":
+                text = str(value or "").strip()
+                summary["content_preview"] = text[:200]
+                summary["content_length"] = len(text)
+                continue
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                summary[key] = value
+            else:
+                summary[key] = str(value)[:200]
+        return summary
 
     async def _execute_a_tool(self, tool_call: Any) -> str:
         function_name = tool_call.function.name
@@ -224,24 +248,69 @@ class Agent:
 
         args_dict = self._parse_tool_arguments(tool_call.function.arguments, function_name)
         if args_dict is None:
+            self._emit_flow(
+                "tool_called",
+                {
+                    "tool_name": function_name,
+                    "args_summary": {},
+                    "result_summary": "参数解析失败",
+                    "result_status": "failure",
+                },
+            )
             return "Failed to parse tool arguments."
 
         call_args = dict(args_dict)
         persisted_args = dict(args_dict)
+
         if self._needs_rag_query_rewrite(function_name, args_dict):
-            rewritten_query = self._rewrite_rag_query(str(args_dict["query"]))
-            if rewritten_query and rewritten_query != str(args_dict["query"]).strip():
+            original_query = str(args_dict["query"]).strip()
+            rewritten_query = self._rewrite_rag_query(original_query)
+            if rewritten_query and rewritten_query != original_query:
                 call_args["query"] = rewritten_query
                 persisted_args["rewritten_query"] = rewritten_query
+                self._emit_flow(
+                    "rag_query_rewritten",
+                    {
+                        "original_query": original_query,
+                        "rewritten_query": rewritten_query,
+                    },
+                )
                 self._log(f"Rewrote RAG query for '{function_name}'")
 
         validation_error = self._validate_doc_tool_arguments(function_name, call_args)
         if validation_error:
             self._log(validation_error)
+            self._emit_flow(
+                "guard_hit",
+                {
+                    "guard_hit": [{"code": "doc_content_validation", "detail": "write_blocked"}],
+                    "tool_name": function_name,
+                    "reason": validation_error,
+                },
+            )
+            self._emit_flow(
+                "tool_called",
+                {
+                    "tool_name": function_name,
+                    "args_summary": self._summarize_args(call_args),
+                    "result_summary": validation_error,
+                    "result_status": "failure",
+                },
+            )
             return validation_error
 
         if not self.mcp_client:
-            return f"No MCP client for tool {function_name}"
+            result_str = f"No MCP client for tool {function_name}"
+            self._emit_flow(
+                "tool_called",
+                {
+                    "tool_name": function_name,
+                    "args_summary": self._summarize_args(call_args),
+                    "result_summary": result_str,
+                    "result_status": "failure",
+                },
+            )
+            return result_str
 
         if call_args == args_dict:
             tool_msg = await self.mcp_client.tool_message_from_call(tool_call)
@@ -262,6 +331,22 @@ class Agent:
             self._log(f"Tool '{function_name}': ~{estimated} tokens (truncated)")
         else:
             self._log(f"Tool '{function_name}': ~{estimated} tokens")
+
+        result_status = "success"
+        if any(token in result_str.lower() for token in ("error", "failed", "traceback")):
+            result_status = "failure"
+        if '"errcode":' in result_str and '"errcode": 0' not in result_str:
+            result_status = "failure"
+
+        self._emit_flow(
+            "tool_called",
+            {
+                "tool_name": function_name,
+                "args_summary": self._summarize_args(call_args),
+                "result_summary": result_str[:300],
+                "result_status": result_status,
+            },
+        )
         return result_str
 
     async def _process_tool_calls(self, tool_calls: list[Any]) -> str | None:
@@ -269,6 +354,22 @@ class Agent:
         self._log(f"Processing {len(tool_calls)} tool calls (total: {self.tool_call_count})")
 
         if self.tool_call_count > self.max_tool_calls:
+            self._emit_flow(
+                "guard_hit",
+                {
+                    "guard_hit": [{"code": "tool_limit", "detail": "max_tool_calls_exceeded"}],
+                    "tool_call_count": self.tool_call_count,
+                    "max_tool_calls": self.max_tool_calls,
+                },
+            )
+            self._emit_flow(
+                "stop_reason",
+                {
+                    "code": "guard_stop",
+                    "detail": "max_tool_calls_exceeded",
+                    "layer": "orchestration",
+                },
+            )
             print(f"[{self.name}] Max tool calls ({self.max_tool_calls}) reached.")
             return "You have used up all your tool calls. Please provide the final answer."
 
@@ -314,6 +415,13 @@ class Agent:
 
             if response_message.tool_calls:
                 self.messages.append(response_message.model_dump(exclude_unset=True))
+                self._emit_flow(
+                    "assistant_requested_tools",
+                    {
+                        "tool_names": [call.function.name for call in response_message.tool_calls],
+                        "tool_count": len(response_message.tool_calls),
+                    },
+                )
 
                 forced = await self._process_tool_calls(response_message.tool_calls)
                 if forced:
@@ -321,9 +429,17 @@ class Agent:
                     self.messages.append(
                         {
                             "role": "user",
-                            "content": "你已用尽所有工具调用次数，请根据已收集的信息直接给出最终结论。",
+                            "content": "你已用尽所有工具调用次数，请根据已经收集的信息直接给出最终结论。",
                         }
                     )
                     continue
             else:
-                return response_message.content
+                self._emit_flow(
+                    "stop_reason",
+                    {
+                        "code": "final_answer",
+                        "detail": "model_response_without_tool_calls",
+                        "layer": "orchestration",
+                    },
+                )
+                return response_message.content or ""
