@@ -232,6 +232,27 @@ def evaluate_scenario_gate(
             return True, "assistant 正确确认了已上传文件的知识库状态。"
         return False, "assistant 没有确认刚上传文件已进入知识库。"
 
+    if gate_id == "duplicate_upload_same_content_must_be_noticed":
+        if not uploaded_file:
+            return False, "缺少最近上传文件状态。"
+        action = str(uploaded_file["upload_action"] or "")
+        if action not in {"unchanged", "duplicate_content"}:
+            return False, f"最近上传动作不是同内容重复上传：{action}"
+        markers = ("内容完全一致", "未重复加入", "未再次写入", "文件名和内容都重复")
+        if any(marker in assistant_reply for marker in markers):
+            return True, "assistant 明确提示了同内容重复上传。"
+        return False, "assistant 没有明确提示同内容重复上传。"
+
+    if gate_id == "same_name_upload_update_must_be_noticed":
+        if not uploaded_file:
+            return False, "缺少最近上传文件状态。"
+        action = str(uploaded_file["upload_action"] or "")
+        if action != "replaced":
+            return False, f"最近上传动作不是同名更新：{action}"
+        if "同名" in assistant_reply and any(marker in assistant_reply for marker in ("已存在", "更新")):
+            return True, "assistant 明确提示了同名文件更新。"
+        return False, "assistant 没有明确提示同名文件更新。"
+
     return True, f"未实现的 scenario gate，默认跳过：{gate_id}"
 
 

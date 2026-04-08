@@ -58,28 +58,73 @@ def _upload_storage_name(filename: str) -> str:
     return f"upload__{normalized_name}"
 
 
-def _store_pdf_in_knowledge_base(file_bytes: bytes, original_name: str) -> tuple[Path, str]:
+def _knowledge_base_pdf_paths() -> list[Path]:
+    return sorted(path for path in KNOWLEDGE_BASE_PAPER_DIR.rglob("*.pdf") if path.is_file())
+
+
+def _relative_project_path(path: Path) -> str:
+    return str(path.relative_to(Path(__file__).resolve().parents[1]))
+
+
+def _store_pdf_in_knowledge_base(file_bytes: bytes, original_name: str) -> dict[str, str | None]:
     KNOWLEDGE_BASE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target_path = KNOWLEDGE_BASE_UPLOAD_DIR / _upload_storage_name(original_name)
+    incoming_sha = _sha256_bytes(file_bytes)
 
     if target_path.exists():
         existing_bytes = target_path.read_bytes()
-        if _sha256_bytes(existing_bytes) == _sha256_bytes(file_bytes):
-            return target_path, "unchanged"
+        if _sha256_bytes(existing_bytes) == incoming_sha:
+            return {
+                "file_name": target_path.name,
+                "stored_path": _relative_project_path(target_path),
+                "action": "unchanged",
+                "matched_file_name": target_path.name,
+                "matched_stored_path": _relative_project_path(target_path),
+            }
         action = "replaced"
     else:
         action = "added"
 
+    for existing_path in _knowledge_base_pdf_paths():
+        if existing_path == target_path:
+            continue
+        if _sha256_bytes(existing_path.read_bytes()) != incoming_sha:
+            continue
+        return {
+            "file_name": target_path.name,
+            "stored_path": _relative_project_path(existing_path),
+            "action": "duplicate_content",
+            "matched_file_name": existing_path.name,
+            "matched_stored_path": _relative_project_path(existing_path),
+        }
+
     target_path.write_bytes(file_bytes)
-    return target_path, action
+    return {
+        "file_name": target_path.name,
+        "stored_path": _relative_project_path(target_path),
+        "action": action,
+        "matched_file_name": target_path.name if action == "replaced" else None,
+        "matched_stored_path": _relative_project_path(target_path) if action == "replaced" else None,
+    }
 
 
-def _build_upload_reply(stored_name: str, action: str) -> str:
+def _build_upload_reply(
+    file_name: str,
+    action: str,
+    matched_file_name: str | None = None,
+) -> str:
     if action == "unchanged":
-        return f"PDF `{stored_name}` 已存在于知识库，未重复写入。后续检索会继续使用它。"
+        return f"PDF `{file_name}` 已经在知识库里了，文件名和内容都重复，未再次写入。"
+    if action == "duplicate_content":
+        if matched_file_name:
+            return (
+                f"PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，"
+                "未重复加入知识库。"
+            )
+        return f"PDF `{file_name}` 与知识库中的现有文件内容完全一致，未重复加入知识库。"
     if action == "replaced":
-        return f"PDF `{stored_name}` 已更新到知识库。后续检索会自动纳入新内容。"
-    return f"PDF `{stored_name}` 已加入知识库。后续检索会自动纳入它。"
+        return f"检测到同名 PDF `{file_name}` 已存在，已用新上传内容更新知识库中的同名文件。"
+    return f"PDF `{file_name}` 已加入知识库。后续检索会自动纳入它。"
 
 
 def is_add_to_knowledge_base_request(content: str) -> bool:
@@ -127,8 +172,13 @@ def maybe_short_circuit_upload_followup(session_id: str, content: str) -> str | 
 
     file_name = str(latest_upload["file_name"])
     action = str(latest_upload["upload_action"])
+    matched_file_name = str(latest_upload.get("matched_file_name") or "").strip() or None
     if action == "unchanged":
         return f"刚上传的 PDF `{file_name}` 已经在知识库里了，不需要重复添加。"
+    if action == "duplicate_content":
+        if matched_file_name:
+            return f"刚上传的 PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，未重复加入。"
+        return f"刚上传的 PDF `{file_name}` 与知识库中的已有文件内容完全一致，未重复加入。"
     if action == "replaced":
         return f"刚上传的 PDF `{file_name}` 已经更新到知识库了。"
     return f"刚上传的 PDF `{file_name}` 已经加入知识库了。"
@@ -231,7 +281,12 @@ def upload_knowledge_base_file():
     if not file_bytes.startswith(PDF_HEADER):
         return jsonify({"error": "uploaded file is not a valid PDF"}), 400
 
-    stored_path, action = _store_pdf_in_knowledge_base(file_bytes, original_name)
+    store_result = _store_pdf_in_knowledge_base(file_bytes, original_name)
+    file_name = str(store_result["file_name"] or "")
+    stored_path = str(store_result["stored_path"] or "")
+    action = str(store_result["action"] or "")
+    matched_file_name = str(store_result.get("matched_file_name") or "").strip() or None
+    matched_stored_path = str(store_result.get("matched_stored_path") or "").strip() or None
 
     session_id = build_session_id(
         chat_type=str(request.form.get("chatType", "")),
@@ -240,22 +295,26 @@ def upload_knowledge_base_file():
     )
     save_uploaded_file(
         session_id=session_id,
-        file_name=stored_path.name,
-        stored_path=str(stored_path.relative_to(Path(__file__).resolve().parents[1])),
+        file_name=file_name,
+        stored_path=stored_path,
         file_sha256=_sha256_bytes(file_bytes),
         upload_action=action,
+        matched_file_name=matched_file_name,
+        matched_stored_path=matched_stored_path,
     )
-    user_marker = f"[上传PDF] {stored_path.name}"
-    assistant_reply = _build_upload_reply(stored_path.name, action)
+    user_marker = f"[上传PDF] {file_name}"
+    assistant_reply = _build_upload_reply(file_name, action, matched_file_name)
     save_turn(session_id, "user", user_marker)
     save_turn(session_id, "assistant", assistant_reply)
 
     return jsonify(
         {
             "reply": assistant_reply,
-            "fileName": stored_path.name,
+            "fileName": file_name,
             "action": action,
-            "knowledgeBasePath": str(stored_path.relative_to(Path(__file__).resolve().parents[1])),
+            "knowledgeBasePath": stored_path,
+            "matchedFileName": matched_file_name,
+            "matchedKnowledgeBasePath": matched_stored_path,
         }
     )
 

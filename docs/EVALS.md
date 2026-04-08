@@ -2,12 +2,14 @@
 
 ## 目的
 
-当前 HE 层主要服务两个特定场景：
+当前 HE 层主要服务四个特定场景：
 
 - 基于 `knowledge_base/papers/` 中的三篇固定论文生成一份新的企业微信文档
 - 文档必须包含：背景、每篇论文摘要、横向对比、结论与建议
 - 当前场景首轮不应提前出现 comparison table
 - 用户先上传 PDF，再发“把这份文档添加到知识库”时，系统应直接确认已入库，而不是再次索要文件
+- 用户重复上传内容完全一致的 PDF 时，系统应明确提示重复内容
+- 用户上传同名但内容不同的 PDF 时，系统应明确提示这是同名更新
 
 ## 结构
 
@@ -31,6 +33,13 @@
 - 用户补一句“把这份文档添加到知识库”时，assistant 再次索要文件
 - assistant 没有明确确认刚上传文件已经入库
 
+另外还加入了两个上传去重场景：
+
+- `upload_duplicate_pdf_notice`
+  - 抓内容完全一致的重复上传是否被明确提示
+- `upload_same_name_pdf_update_notice`
+  - 抓同名但内容不同的上传是否被明确提示为更新
+
 ## 运行方式
 
 用户在企微里完成一次真实测试后，执行：
@@ -38,6 +47,8 @@
 ```powershell
 python scripts/run_eval_case.py --scenario-id pdf_3papers_create_summary_doc --session-id dm:14292
 python scripts/run_eval_case.py --scenario-id upload_pdf_add_to_knowledge_base --session-id dm:14292
+python scripts/run_eval_case.py --scenario-id upload_duplicate_pdf_notice --session-id dm:14292
+python scripts/run_eval_case.py --scenario-id upload_same_name_pdf_update_notice --session-id dm:14292
 ```
 
 其中：
@@ -73,5 +84,7 @@ python scripts/run_eval_case.py --scenario-id upload_pdf_add_to_knowledge_base -
 
 - `pdf_3papers_create_summary_doc`
 - `upload_pdf_add_to_knowledge_base`
+- `upload_duplicate_pdf_notice`
+- `upload_same_name_pdf_update_notice`
 
 不会自动推广到其他场景。

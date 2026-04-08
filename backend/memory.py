@@ -22,6 +22,16 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column in columns:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
@@ -91,10 +101,14 @@ def init_db() -> None:
                 stored_path TEXT NOT NULL,
                 file_sha256 TEXT NOT NULL,
                 upload_action TEXT NOT NULL,
+                matched_file_name TEXT,
+                matched_stored_path TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
+        _ensure_column(conn, "session_uploaded_files", "matched_file_name", "TEXT")
+        _ensure_column(conn, "session_uploaded_files", "matched_stored_path", "TEXT")
         conn.commit()
 
 
@@ -229,6 +243,8 @@ def save_uploaded_file(
     stored_path: str,
     file_sha256: str,
     upload_action: str,
+    matched_file_name: str | None = None,
+    matched_stored_path: str | None = None,
 ) -> None:
     session_id = str(session_id or "").strip()
     file_name = str(file_name or "").strip()
@@ -246,11 +262,21 @@ def save_uploaded_file(
                 file_name,
                 stored_path,
                 file_sha256,
-                upload_action
+                upload_action,
+                matched_file_name,
+                matched_stored_path
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, file_name, stored_path, file_sha256, upload_action),
+            (
+                session_id,
+                file_name,
+                stored_path,
+                file_sha256,
+                upload_action,
+                str(matched_file_name or "").strip() or None,
+                str(matched_stored_path or "").strip() or None,
+            ),
         )
         conn.commit()
 
@@ -263,7 +289,14 @@ def latest_uploaded_file(session_id: str, within_minutes: int = 30) -> dict[str,
     with _connect() as conn:
         row = conn.execute(
             """
-            SELECT file_name, stored_path, file_sha256, upload_action, created_at
+            SELECT
+                file_name,
+                stored_path,
+                file_sha256,
+                upload_action,
+                matched_file_name,
+                matched_stored_path,
+                created_at
             FROM session_uploaded_files
             WHERE session_id = ?
               AND created_at >= datetime('now', ?)
@@ -310,6 +343,7 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
         uploaded_files = conn.execute(
             """
             SELECT file_name, stored_path, upload_action, created_at
+                 , matched_file_name, matched_stored_path
             FROM session_uploaded_files
             WHERE session_id = ?
               AND created_at >= datetime('now', '-7 day')
@@ -353,7 +387,9 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
             upload_lines.append(
                 f"- file_name={row['file_name']}; "
                 f"stored_path={row['stored_path']}; "
-                f"action={row['upload_action']}"
+                f"action={row['upload_action']}; "
+                f"matched_file_name={row['matched_file_name'] or ''}; "
+                f"matched_stored_path={row['matched_stored_path'] or ''}"
             )
         sections.append("\n".join(upload_lines))
 

@@ -1,0 +1,15 @@
+id: upload_duplicate_pdf_notice
+goal: 用户连续上传内容完全一致的 PDF 时，系统必须明确提示重复内容，不再重复入库。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+  - turns/turn_2.txt
+scenario_gates:
+  - id: uploaded_pdf_must_be_recorded
+    description: 重复上传后，session 必须保留最近上传文件状态。
+  - id: duplicate_upload_same_content_must_be_noticed
+    description: 内容完全一致的重复上传必须被明确提示，不能静默写入。
+artifact_focus:
+  - assistant_reply
+  - uploaded_file
+  - gate_results
