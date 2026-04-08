@@ -1,4 +1,5 @@
 from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.schema import NodeRelationship, RelatedNodeInfo
 
 from .load import LlamaIndexLoader
 
@@ -22,4 +23,15 @@ class LlamaIndexChunker:
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
         )
-        return node_parser.get_nodes_from_documents(documents)
+        nodes = node_parser.get_nodes_from_documents(documents)
+
+        for node in nodes:
+            file_name = node.metadata.get("file_name")
+            if not file_name:
+                continue
+            node.relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(
+                node_id=file_name,
+                metadata={"file_name": file_name},
+            )
+
+        return nodes

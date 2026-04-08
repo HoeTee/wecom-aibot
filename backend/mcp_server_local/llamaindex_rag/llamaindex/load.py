@@ -29,6 +29,9 @@ class LlamaIndexLoader:
         return sorted(
             [pdf for pdf in target_dir.iterdir() if pdf.is_file() and pdf.suffix.lower() == ".pdf"]
         )
+
+    def _pdf_file_map(self, file_dir: Path | None = None) -> dict[str, Path]:
+        return {file_path.name: file_path for file_path in self._pdf_files(file_dir)}
     
     
     def _file_sha256(self, file_dir: Path | None = None) -> list[str]: 
@@ -48,6 +51,19 @@ class LlamaIndexLoader:
         hashes.sort()
         return hashes # 输出sha-256值列
 
+    def _file_sha256_map(self, file_dir: Path | None = None) -> dict[str, str]:
+        target_dir = self.data_dir if file_dir is None else Path(file_dir).resolve()
+        hash_map: dict[str, str] = {}
+
+        for file_path in self._pdf_files(target_dir):
+            h = hashlib.sha256()
+            with open(file_path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+            hash_map[file_path.name] = h.hexdigest()
+
+        return dict(sorted(hash_map.items()))
+
 
     def _validate_data_dir(self, data_dir: Path):
         if not data_dir.exists():
@@ -60,14 +76,23 @@ class LlamaIndexLoader:
         if not pdf_files:
             raise FileNotFoundError(f"No PDF files found in data directory: {data_dir}")
 
-    def load(self):
-        self._validate_data_dir(self.data_dir)
+    def load(self, file_paths: list[Path] | None = None):
+        if file_paths is None:
+            self._validate_data_dir(self.data_dir)
+            input_dir = str(self.data_dir)
+            input_files = None
+        else:
+            input_files = [str(Path(path).resolve()) for path in file_paths]
+            if not input_files:
+                return []
+            input_dir = None
 
         file_extractor = {}
         file_extractor[".pdf"] = PDFReader()
 
         reader = SimpleDirectoryReader(
-            input_dir=str(self.data_dir),
+            input_dir=input_dir,
+            input_files=input_files,
             required_exts=['.pdf'], 
             file_extractor=file_extractor, 
             raise_on_error=True, 

@@ -2,6 +2,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, UTC
 from pathlib import Path
 
 from llama_index.core import Document, SummaryIndex, StorageContext, VectorStoreIndex, load_index_from_storage
@@ -12,6 +13,7 @@ from .load import LlamaIndexLoader
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_PERSIST_DIR = PROJECT_ROOT / "persist"
 DEFAULT_MANIFEST_PATH = PROJECT_ROOT / "manifest" / "manifest.json"
+MANIFEST_VERSION = 2
 
 
 @dataclass
@@ -36,14 +38,19 @@ class LlamaIndexBuilder:
         self.persist_dir = Path(persist_dir).resolve()
         self.manifest_path = Path(manifest_path).resolve()
 
-    def _current_doc_hashes(self) -> list[str]:
-        return self.loader._file_sha256(str(self.loader.data_dir))
+    def _current_file_hashes(self) -> dict[str, str]:
+        return self.loader._file_sha256_map(str(self.loader.data_dir))
 
     def _read_manifest(self) -> dict:
         if not self.manifest_path.exists():
             return {}
         with self.manifest_path.open("r", encoding="utf-8") as f:
             return json.load(f)
+
+    def _write_manifest(self, payload: dict) -> None:
+        os.makedirs(self.manifest_path.parent, exist_ok=True)
+        with self.manifest_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
 
     def _paper_brief_text(self, file_name: str, full_text: str) -> str:
         normalized_text = "\n".join(line.strip() for line in full_text.splitlines() if line.strip())
@@ -90,31 +97,48 @@ class LlamaIndexBuilder:
 
         return summary_documents
 
-    def build(self) -> IndexBundle:
-        doc_hashes = self._current_doc_hashes()
-        manifest = self._read_manifest()
+    def _summary_documents_from_manifest(self, manifest_files: dict[str, dict], source_files: list[str]) -> list[Document]:
+        summary_documents: list[Document] = []
+        for file_name in source_files:
+            entry = manifest_files[file_name]
+            summary_documents.append(
+                Document(
+                    text=entry["summary_text"],
+                    metadata={"file_name": file_name},
+                    id_=file_name,
+                )
+            )
+        return summary_documents
+
+    def _load_existing_vector_index(self) -> VectorStoreIndex:
+        storage_context = StorageContext.from_defaults(persist_dir=str(self.persist_dir))
+        return load_index_from_storage(storage_context)
+
+    def _persist_vector_index(self, vector_index: VectorStoreIndex) -> None:
+        os.makedirs(self.persist_dir, exist_ok=True)
+        vector_index.storage_context.persist(persist_dir=str(self.persist_dir))
+
+    def _full_rebuild(self, current_hashes: dict[str, str]) -> IndexBundle:
         documents = self.loader.load()
         summary_documents = self._summary_documents(documents)
         nodes = self.chunker.chunk(documents=documents)
-        source_files = [document.metadata.get("file_name", document.doc_id) for document in summary_documents]
+        vector_index = VectorStoreIndex(nodes)
 
-        vector_index = None
-        if doc_hashes == manifest.get("doc_hashes", []) and self.persist_dir.exists():
-            try:
-                storage_context = StorageContext.from_defaults(persist_dir=str(self.persist_dir))
-                vector_index = load_index_from_storage(storage_context)
-            except Exception as exc:
-                print(f"Failed to load index from storage: {exc}. Rebuilding index.")
+        self._persist_vector_index(vector_index)
 
-        if vector_index is None:
-            vector_index = VectorStoreIndex(nodes)
-            os.makedirs(self.persist_dir, exist_ok=True)
-            os.makedirs(self.manifest_path.parent, exist_ok=True)
+        now_iso = datetime.now(UTC).isoformat()
+        manifest_files = {
+            document.metadata.get("file_name", document.doc_id): {
+                "sha256": current_hashes[document.metadata.get("file_name", document.doc_id)],
+                "ref_doc_id": document.metadata.get("file_name", document.doc_id),
+                "summary_text": document.text,
+                "updated_at": now_iso,
+            }
+            for document in summary_documents
+        }
+        self._write_manifest({"version": MANIFEST_VERSION, "files": manifest_files})
 
-            vector_index.storage_context.persist(persist_dir=str(self.persist_dir))
-            with self.manifest_path.open("w", encoding="utf-8") as f:
-                json.dump({"doc_hashes": doc_hashes}, f, ensure_ascii=False, indent=2)
-
+        source_files = sorted(manifest_files)
         summary_index = SummaryIndex.from_documents(summary_documents)
         return IndexBundle(
             vector_index=vector_index,
@@ -122,3 +146,91 @@ class LlamaIndexBuilder:
             source_files=source_files,
             summary_documents=summary_documents,
         )
+
+    def _incremental_build(
+        self,
+        vector_index: VectorStoreIndex,
+        manifest_files: dict[str, dict],
+        current_hashes: dict[str, str],
+    ) -> IndexBundle:
+        stored_names = set(manifest_files)
+        current_names = set(current_hashes)
+        deleted = sorted(stored_names - current_names)
+        added = sorted(current_names - stored_names)
+        changed = sorted(
+            file_name
+            for file_name in (stored_names & current_names)
+            if manifest_files[file_name].get("sha256") != current_hashes[file_name]
+        )
+
+        for file_name in deleted + changed:
+            vector_index.delete_ref_doc(file_name, delete_from_docstore=True)
+
+        changed_summary_map: dict[str, Document] = {}
+        files_to_reload = added + changed
+        if files_to_reload:
+            file_map = self.loader._pdf_file_map()
+            reload_paths = [file_map[file_name] for file_name in files_to_reload]
+            documents = self.loader.load(file_paths=reload_paths)
+            changed_summary_documents = self._summary_documents(documents)
+            changed_summary_map = {
+                document.metadata.get("file_name", document.doc_id): document
+                for document in changed_summary_documents
+            }
+            nodes = self.chunker.chunk(documents=documents)
+            if nodes:
+                vector_index.insert_nodes(nodes)
+
+        now_iso = datetime.now(UTC).isoformat()
+        new_manifest_files: dict[str, dict] = {}
+        source_files = sorted(current_hashes)
+        for file_name in source_files:
+            if file_name in changed_summary_map:
+                summary_document = changed_summary_map[file_name]
+                new_manifest_files[file_name] = {
+                    "sha256": current_hashes[file_name],
+                    "ref_doc_id": file_name,
+                    "summary_text": summary_document.text,
+                    "updated_at": now_iso,
+                }
+            else:
+                previous_entry = dict(manifest_files[file_name])
+                previous_entry["sha256"] = current_hashes[file_name]
+                previous_entry["ref_doc_id"] = file_name
+                new_manifest_files[file_name] = previous_entry
+
+        self._persist_vector_index(vector_index)
+        self._write_manifest({"version": MANIFEST_VERSION, "files": new_manifest_files})
+
+        summary_documents = self._summary_documents_from_manifest(new_manifest_files, source_files)
+        summary_index = SummaryIndex.from_documents(summary_documents)
+        return IndexBundle(
+            vector_index=vector_index,
+            summary_index=summary_index,
+            source_files=source_files,
+            summary_documents=summary_documents,
+        )
+
+    def build(self) -> IndexBundle:
+        current_hashes = self._current_file_hashes()
+        manifest = self._read_manifest()
+        manifest_files = manifest.get("files", {}) if manifest.get("version") == MANIFEST_VERSION else {}
+
+        if not current_hashes:
+            raise FileNotFoundError(f"No PDF files found in data directory: {self.loader.data_dir}")
+
+        can_incremental_load = (
+            self.persist_dir.exists()
+            and bool(manifest_files)
+            and all("summary_text" in entry for entry in manifest_files.values())
+        )
+
+        if not can_incremental_load:
+            return self._full_rebuild(current_hashes)
+
+        try:
+            vector_index = self._load_existing_vector_index()
+            return self._incremental_build(vector_index, manifest_files, current_hashes)
+        except Exception as exc:
+            print(f"Failed to apply incremental index update: {exc}. Rebuilding index.")
+            return self._full_rebuild(current_hashes)
