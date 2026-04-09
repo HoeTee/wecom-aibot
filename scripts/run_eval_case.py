@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -277,6 +278,25 @@ def build_flow_trace(metadata: dict[str, Any], flow_rows: list[sqlite3.Row]) -> 
     return {"metadata": metadata, "events": events}
 
 
+def latest_attachment_payload(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    for row in reversed(flow_rows):
+        if row["event_name"] != "attachment_prepared":
+            continue
+        payload = parse_args_json(row["payload_json"])
+        return {
+            "attachment_type": payload.get("attachment_type"),
+            "attachment_name": payload.get("attachment_name"),
+            "attachment_path": payload.get("attachment_path"),
+            "created_at": row["created_at"],
+        }
+    return {
+        "attachment_type": None,
+        "attachment_name": None,
+        "attachment_path": None,
+        "created_at": None,
+    }
+
+
 def evaluate_global_gate(
     gate_id: str,
     assistant_reply: str,
@@ -325,6 +345,8 @@ def evaluate_scenario_gate(
     tool_calls: list[sqlite3.Row],
     user_request: str,
     uploaded_file: sqlite3.Row | None,
+    flow_rows: list[sqlite3.Row],
+    attachment_payload: dict[str, Any],
 ) -> tuple[bool, str]:
     write_payload = latest_doc_write_payload(tool_calls)
     content = str(write_payload["args"].get("content", "") or "")
@@ -401,6 +423,50 @@ def evaluate_scenario_gate(
         if "同名" in assistant_reply and any(marker in assistant_reply for marker in ("已存在", "更新")):
             return True, "assistant 明确提示了同名文件更新。"
         return False, "assistant 没有明确提示同名文件更新。"
+
+    if gate_id == "kb_list_must_return_count_and_top_files":
+        has_count = any(token in assistant_reply for token in ("当前共有", "知识库里当前共有", "共有", "目前有"))
+        list_lines = [line for line in assistant_reply.splitlines() if re.match(r"^\d+\.\s", line.strip())]
+        if has_count and list_lines:
+            return True, "知识库列表回复包含数量和文件列表。"
+        return False, "知识库列表回复缺少数量或列表。"
+
+    if gate_id == "kb_related_query_must_return_candidates":
+        candidate_lines = [line for line in assistant_reply.splitlines() if re.match(r"^\d+\.\s", line.strip())]
+        if candidate_lines and "相关" in assistant_reply:
+            return True, "相关性查询回复包含候选列表。"
+        return False, "相关性查询回复没有给出候选列表。"
+
+    if gate_id == "kb_export_must_clarify_original_or_summary":
+        if all(token in assistant_reply for token in ("原", "PDF", "摘要")):
+            return True, "导出流程已先澄清原文件还是摘要。"
+        return False, "导出流程没有澄清原文件还是摘要。"
+
+    if gate_id == "kb_original_export_must_prepare_attachment":
+        if attachment_payload.get("attachment_type") == "file" and attachment_payload.get("attachment_path"):
+            return True, "导出原文件时已准备 attachment。"
+        return False, "导出原文件时没有记录 attachment。"
+
+    if gate_id == "kb_delete_must_confirm_before_delete":
+        if "确认删除" in assistant_reply or ("删除" in assistant_reply and "确认" in assistant_reply):
+            return True, "删除前已要求确认。"
+        return False, "删除流程没有要求确认。"
+
+    if gate_id == "doc_merge_must_confirm_target_source_action":
+        required_tokens = ("目标文档", "来源文档", "动作")
+        if all(token in assistant_reply for token in required_tokens):
+            return True, "合并流程已确认目标文档、来源文档和动作。"
+        return False, "合并流程缺少目标/来源/动作确认。"
+
+    if gate_id == "doc_replace_must_preview_scope_before_execution":
+        if "我准备替换当前文档里的这部分内容" in assistant_reply and "章节" in assistant_reply:
+            return True, "替换流程已展示待替换部分。"
+        return False, "替换流程没有展示待替换内容预览。"
+
+    if gate_id == "doc_expand_must_confirm_generated_title":
+        if "新章节标题" in assistant_reply or "我准备把新章节标题定为" in assistant_reply:
+            return True, "扩写流程已确认自动生成的标题。"
+        return False, "扩写流程没有确认新章节标题。"
 
     return True, f"未实现的 scenario gate，默认跳过：{gate_id}"
 
@@ -503,6 +569,7 @@ def main() -> None:
     user_request = str(user_turn["content"])
     write_payload = latest_doc_write_payload(tool_calls)
     rag_query_payload = latest_rag_query_payload(tool_calls)
+    attachment_payload = latest_attachment_payload(flow_rows)
     commit = git_commit()
 
     metadata = {
@@ -524,6 +591,7 @@ def main() -> None:
     dump_json(run_dir / "tool_trace.json", [dict(row) for row in tool_calls])
     dump_json(run_dir / "doc_binding.json", dict(doc_binding) if doc_binding else {})
     dump_json(run_dir / "uploaded_file.json", dict(uploaded_file) if uploaded_file else {})
+    dump_json(run_dir / "attachment.json", attachment_payload)
     dump_json(run_dir / "rag_query.json", rag_query_payload)
     (run_dir / "written_doc_content.md").write_text(str(write_payload["args"].get("content", "") or ""), encoding="utf-8")
     dump_json(run_dir / "flow_trace.json", build_flow_trace(metadata, flow_rows))
@@ -542,7 +610,15 @@ def main() -> None:
         )
 
     for gate_id in scenario_gate_catalog:
-        passed, reason = evaluate_scenario_gate(gate_id, assistant_reply, tool_calls, user_request, uploaded_file)
+        passed, reason = evaluate_scenario_gate(
+            gate_id,
+            assistant_reply,
+            tool_calls,
+            user_request,
+            uploaded_file,
+            flow_rows,
+            attachment_payload,
+        )
         gate_results.append(
             {
                 "id": gate_id,

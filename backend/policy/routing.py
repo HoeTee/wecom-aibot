@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.policy.document import is_fresh_document_request
 from backend.state.store import latest_uploaded_file
 
 
@@ -11,32 +10,29 @@ def is_add_to_knowledge_base_request(content: str) -> bool:
     if not text:
         return False
 
-    knowledge_tokens = ("知识库", "知识源", "知识源库")
-    add_tokens = ("加入", "添加", "放到", "纳入", "导入")
-    file_tokens = (
-        "这份文档",
-        "这个文件",
-        "这份文件",
-        "刚上传的文件",
-        "刚才上传的文件",
-        "刚上传的pdf",
-        "刚上传的PDF",
-        "这个pdf",
-        "这个PDF",
-        "文档",
-        "文件",
-        "pdf",
-        "PDF",
-    )
-    generation_tokens = ("总结", "摘要", "生成", "分析", "写一份", "文档必须包含")
-
-    if not any(token in text for token in knowledge_tokens):
+    if not any(token in text for token in ("知识库", "知识源", "知识库里")):
         return False
-    if not any(token in text for token in add_tokens):
+    if not any(token in text for token in ("加入", "添加", "放到", "纳入", "导入")):
         return False
-    if not any(token in text for token in file_tokens):
+    if not any(
+        token in text
+        for token in (
+            "这份文档",
+            "这个文件",
+            "刚上传的文件",
+            "刚才上传的文件",
+            "刚上传的 PDF",
+            "刚上传的pdf",
+            "这个 PDF",
+            "这个pdf",
+            "文档",
+            "文件",
+            "PDF",
+            "pdf",
+        )
+    ):
         return False
-    if any(token in text for token in generation_tokens):
+    if any(token in text for token in ("总结", "摘要", "生成", "分析", "文档必须包含")):
         return False
     return True
 

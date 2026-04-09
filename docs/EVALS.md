@@ -59,6 +59,54 @@ HE 已独立到 `he/`：
 
 - 同名但内容不同的上传是否被明确提示为更新
 
+### 5. `kb_list_files`
+
+抓：
+
+- 知识库列表回复是否包含数量和文件列表
+
+### 6. `kb_related_candidates`
+
+抓：
+
+- 相关性查询是否先给候选，而不是直接替用户决定具体文件
+
+### 7. `kb_export_action_clarify`
+
+抓：
+
+- 选择具体文件后，系统是否继续澄清“原文件还是摘要”
+
+### 8. `kb_export_original_pdf`
+
+抓：
+
+- 用户明确要原文件时，是否真的准备了 attachment
+
+### 9. `kb_delete_file_confirmation`
+
+抓：
+
+- 删除流程是否先确认，再执行
+
+### 10. `doc_merge_kb_into_current`
+
+抓：
+
+- 并入当前文档前，是否确认目标文档、来源文档和动作
+
+### 11. `doc_replace_kb_section`
+
+抓：
+
+- 替换前，是否先展示将被替换的章节预览
+
+### 12. `doc_expand_kb_section`
+
+抓：
+
+- 自动生成新章节标题后，是否先确认标题
+
 ## 运行方式
 
 用户在企微里完成真实测试后，执行：
@@ -87,6 +135,7 @@ python scripts/run_eval_case.py --scenario-id upload_same_name_pdf_update_notice
 - `rag_query.json`
 - `doc_binding.json`
 - `uploaded_file.json`
+- `attachment.json`
 - `written_doc_content.md`
 - `gate_results.json`
 - `evaluator.json`

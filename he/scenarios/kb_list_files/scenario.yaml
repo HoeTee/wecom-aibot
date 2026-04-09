@@ -1,0 +1,12 @@
+id: kb_list_files
+goal: 当用户询问知识库文件列表时，系统应返回总数和前几篇文件名，而不是误走 RAG 或文档编辑。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+scenario_gates:
+  - id: kb_list_must_return_count_and_top_files
+    description: 知识库列表回复必须包含数量和文件列表。
+artifact_focus:
+  - assistant_reply
+  - flow_trace
+  - evaluator

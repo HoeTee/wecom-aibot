@@ -117,6 +117,16 @@ def init_db() -> None:
                 payload_json TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS session_pending_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                request_id TEXT,
+                action_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TEXT
+            );
             """
         )
         _ensure_column(conn, "conversation_turns", "request_id", "TEXT")
@@ -401,6 +411,154 @@ def latest_uploaded_file(session_id: str, within_minutes: int = 30) -> dict[str,
         ).fetchone()
 
     return dict(row) if row else None
+
+
+def current_bound_doc(session_id: str) -> dict[str, Any] | None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT request_id, doc_id, doc_url, doc_name, last_tool_name, last_user_text, updated_at
+            FROM session_docs
+            WHERE session_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
+def recent_bound_docs(session_id: str, limit: int = 5) -> list[dict[str, Any]]:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return []
+
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT request_id, doc_id, doc_url, doc_name, last_tool_name, last_user_text, updated_at
+            FROM session_docs
+            WHERE session_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (session_id, int(limit)),
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def save_pending_action(
+    session_id: str,
+    action_type: str,
+    payload: dict[str, Any],
+    request_id: str | None = None,
+) -> None:
+    session_id = str(session_id or "").strip()
+    action_type = str(action_type or "").strip()
+    request_id = str(request_id or "").strip() or None
+    if not session_id or not action_type:
+        return
+
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO session_pending_actions (session_id, request_id, action_type, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                request_id,
+                action_type,
+                _json_dumps(payload),
+            ),
+        )
+        conn.commit()
+
+
+def latest_pending_action(
+    session_id: str,
+    *,
+    action_type: str | None = None,
+    within_minutes: int = 120,
+) -> dict[str, Any] | None:
+    session_id = str(session_id or "").strip()
+    action_type = str(action_type or "").strip() or None
+    if not session_id:
+        return None
+
+    query = """
+        SELECT id, request_id, action_type, payload_json, created_at
+        FROM session_pending_actions
+        WHERE session_id = ?
+          AND resolved_at IS NULL
+          AND created_at >= datetime('now', ?)
+    """
+    params: list[Any] = [session_id, f"-{int(within_minutes)} minute"]
+    if action_type:
+        query += " AND action_type = ?"
+        params.append(action_type)
+    query += " ORDER BY id DESC LIMIT 1"
+
+    with _connect() as conn:
+        row = conn.execute(query, tuple(params)).fetchone()
+
+    if not row:
+        return None
+
+    payload_json = row["payload_json"]
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        payload = {}
+
+    return {
+        "id": row["id"],
+        "request_id": row["request_id"],
+        "action_type": row["action_type"],
+        "payload": payload,
+        "created_at": row["created_at"],
+    }
+
+
+def resolve_pending_action(action_id: int) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE session_pending_actions
+            SET resolved_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (int(action_id),),
+        )
+        conn.commit()
+
+
+def resolve_all_pending_actions(session_id: str, action_type: str | None = None) -> None:
+    session_id = str(session_id or "").strip()
+    action_type = str(action_type or "").strip() or None
+    if not session_id:
+        return
+
+    query = """
+        UPDATE session_pending_actions
+        SET resolved_at = CURRENT_TIMESTAMP
+        WHERE session_id = ?
+          AND resolved_at IS NULL
+    """
+    params: list[Any] = [session_id]
+    if action_type:
+        query += " AND action_type = ?"
+        params.append(action_type)
+
+    with _connect() as conn:
+        conn.execute(query, tuple(params))
+        conn.commit()
 
 
 def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:

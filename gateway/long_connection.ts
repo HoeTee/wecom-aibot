@@ -15,6 +15,12 @@ type ChatRequest = {
 
 type ChatResponse = {
   reply: string;
+  requestId?: string;
+  attachment?: {
+    type: "file";
+    path: string;
+    name: string;
+  };
 };
 
 type UploadKnowledgeBaseResponse = {
@@ -56,7 +62,7 @@ async function tryReplyStream(
   }
 }
 
-async function fetchReply(payload: ChatRequest): Promise<string> {
+async function fetchReply(payload: ChatRequest): Promise<ChatResponse> {
   const response = await fetch(`${backendBaseUrl}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -72,7 +78,7 @@ async function fetchReply(payload: ChatRequest): Promise<string> {
   if (!data.reply) {
     throw new Error("Backend response did not contain reply");
   }
-  return data.reply;
+  return data;
 }
 
 function buildChatRequest(frame: WsFrame, content: string): ChatRequest {
@@ -136,10 +142,21 @@ wsClient.on("message.text", async (frame: WsFrame) => {
   void tryReplyStream(frame, streamId, "Working on it...", false);
 
   try {
-    const reply = await fetchReply(payload);
-    const delivered = await tryReplyStream(frame, streamId, reply, true);
+    const result = await fetchReply(payload);
+    const delivered = await tryReplyStream(frame, streamId, result.reply, true);
     if (!delivered) {
       console.error("Final reply was not acknowledged by WeCom");
+    }
+
+    if (result.attachment?.type === "file") {
+      const filePath = result.attachment.path;
+      const fileName = result.attachment.name;
+      const fileBuffer = Buffer.from(await (await import("fs/promises")).readFile(filePath));
+      const uploadResult = await wsClient.uploadMedia(fileBuffer, {
+        type: "file",
+        filename: fileName,
+      });
+      await wsClient.replyMedia(frame, "file", uploadResult.media_id);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

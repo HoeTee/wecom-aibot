@@ -26,8 +26,9 @@ def create_app() -> Flask:
 
         try:
             payload.setdefault("requestId", generate_request_id())
-            reply = asyncio.run(run_chat(payload))
-            return jsonify({"reply": reply, "requestId": payload["requestId"]})
+            result = asyncio.run(run_chat(payload))
+            response = {"requestId": payload["requestId"], **result}
+            return jsonify(response)
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
 
