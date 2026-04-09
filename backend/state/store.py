@@ -10,6 +10,8 @@ from uuid import uuid4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = PROJECT_ROOT / "data" / "memory.sqlite3"
+FLOW_LOG_DIR = PROJECT_ROOT / "data" / "logs" / "flow"
+FLOW_LOG_PATH = FLOW_LOG_DIR / "flow_runtime.log"
 
 DOC_ID_PATTERN = re.compile(r'(?i)(?:docid|doc_id)\b["\']?\s*[:=]\s*["\']?([A-Za-z0-9_-]+)')
 DOC_NAME_PATTERN = re.compile(r'(?i)(?:doc_name|docname)\b["\']?\s*[:=]\s*["\']?([^\n,"\'}]+)')
@@ -234,6 +236,20 @@ def save_flow_event(
             ),
         )
         conn.commit()
+    FLOW_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    with FLOW_LOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(
+            _json_dumps(
+                {
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "layer_at_event": layer_at_event,
+                    "event_name": event_name,
+                    "payload": payload,
+                }
+            )
+            + "\n"
+        )
 
 
 def extract_doc_binding(tool_name: str, args_dict: dict[str, Any], result_text: str) -> dict[str, str | None] | None:

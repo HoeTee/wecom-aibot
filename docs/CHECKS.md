@@ -46,12 +46,26 @@
 
 动作层开始 CLI 化后，每次关键评测也应导出独立的 `contract_results.json`。
 
-当前第一阶段先覆盖 `kb.*`：
+当前阶段至少覆盖：
 
 - `kb.list`
 - `kb.list_uploads`
 - `kb.match_related`
 - `kb.export`
+- `doc.*`
+- `rag.*`
+
+## flow_results
+
+每次关键评测也应导出独立的 `flow_results.json`。
+
+当前至少检查：
+
+- `route_selected` 是否存在
+- `stop_reason` 是否存在
+- 如果 assistant 请求了 tool，是否先产生 `agent_plan_created`
+- 如果 assistant 请求了 tool，是否先产生 `agent_self_check`
+- `agent_self_check` 是否出现在首个 `tool_called` 之前
 
 ### metadata
 
@@ -82,6 +96,8 @@
 - `tool_called`
 - `clarify_needed`
 - `stop_reason`
+- `agent_plan_created`
+- `agent_self_check`
 
 ### 字段要求
 

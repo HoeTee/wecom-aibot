@@ -169,6 +169,7 @@ python scripts/run_eval_case.py --scenario-id kb_rename_confirmation --session-i
 - `user_request.txt`
 - `assistant_reply.txt`
 - `contract_results.json`
+- `flow_results.json`
 - `flow_trace.json`
 - `tool_trace.json`
 - `rag_query.json`
@@ -197,9 +198,10 @@ python scripts/run_eval_case.py --scenario-id kb_rename_confirmation --session-i
 
 - `he/runs/<run_id>/<scenario_id>/flow_trace.json`
 
-当前第一阶段也开始导出：
+当前也会导出：
 
 - `he/runs/<run_id>/<scenario_id>/contract_results.json`
+- `he/runs/<run_id>/<scenario_id>/flow_results.json`
 
 默认结构：
 
@@ -238,6 +240,8 @@ python scripts/run_eval_case.py --scenario-id kb_rename_confirmation --session-i
 - `tool_called`
 - `clarify_needed`
 - `stop_reason`
+- `agent_plan_created`
+- `agent_self_check`
 
 ## evaluator
 
@@ -295,6 +299,12 @@ maintenance 不假设后台自动运行。
 - 汇总
 - 提炼
 - 清理不再需要的旧 traces
+
+清理测试产物统一使用：
+
+```powershell
+python scripts/cleanup_artifacts.py
+```
 
 ## 当前边界
 

@@ -9,9 +9,11 @@ agent 通过 MCP tools 调用外部能力，而不是直接自由执行本地命
 - 稳定 MCP 连接入口仍保留在 `backend/mcp_client/*`
 - 新的主编辑位置优先收敛到 `backend/runtime/*`
 - 真正的本地 tool 实现优先收敛到 `backend/tools/*`
-- 当前第一阶段开始把知识库动作收敛成 CLI 风格：
+- 当前动作层开始收敛成 CLI 风格：
   - `backend/runtime/cli.py`
   - `backend/tools/kb_cli.py`
+  - `backend/tools/doc_cli.py`
+  - `backend/tools/rag_cli.py`
 - 本地 `stdio` MCP 服务如果启动即退出，应优先检查 `data/logs/mcp/<server_name>_stderr.log`
 - `runtime` 在 stdio 连接失败时，应同时记录 `command`、`args`、`cwd` 和对应 stderr 日志路径
 

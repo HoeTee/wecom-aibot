@@ -10,6 +10,8 @@
 he/
   README.md
   review_template.md
+  contracts/
+  flows/
   gates/
   scenarios/
   runs/
@@ -18,6 +20,8 @@ he/
 
 ## 职责
 
+- `contracts/`：动作合约检查
+- `flows/`：flow 顺序检查
 - `gates/`：共享 hard gates
 - `scenarios/`：固定回归场景
 - `runs/`：单次运行证据包
@@ -31,5 +35,6 @@ HE 的执行脚本仍保留在根目录 `scripts/`：
 
 - `scripts/run_eval_case.py`
 - `scripts/check_layers.py`
+- `scripts/cleanup_artifacts.py`
 
 这是为了保持脚本文件名和调用方式稳定。

@@ -153,7 +153,7 @@
 
 - `backend/runtime/*`
 
-当前第一阶段开始在这一层收敛 CLI dispatch：
+当前开始在这一层统一动作 dispatch：
 
 - `backend/runtime/cli.py`
 
@@ -179,9 +179,11 @@
 
 - `backend/tools/*`
 
-当前第一阶段开始在这一层收敛本地 CLI 风格实现：
+当前开始在这一层收敛本地动作实现：
 
 - `backend/tools/kb_cli.py`
+- `backend/tools/doc_cli.py`
+- `backend/tools/rag_cli.py`
 
 兼容包装仍保留在：
 
@@ -309,6 +311,8 @@ HE 还要看层与层之间有没有断链。
 - `data/memory.sqlite3`
 - `data/index/manifest.json`
 - `data/index/persist/*`
+- `data/logs/flow/flow_runtime.log`
+- `data/logs/cli/cli_runtime.log`
 - `data/logs/mcp/mcp_client.log`
 
 `manifest/`、`persist/`、`logs/` 不再作为根目录一级目录参与结构表达。

@@ -351,6 +351,112 @@ def build_flow_trace(metadata: dict[str, Any], flow_rows: list[sqlite3.Row]) -> 
     return {"metadata": metadata, "events": events}
 
 
+def collect_flow_results(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    for row in flow_rows:
+        payload = parse_args_json(row["payload_json"])
+        events.append(
+            {
+                "event": row["event_name"],
+                "layer_at_event": row["layer_at_event"],
+                "created_at": row["created_at"],
+                "payload": payload,
+            }
+        )
+
+    event_names = [item["event"] for item in events]
+    checks: list[dict[str, Any]] = []
+
+    route_present = "route_selected" in event_names
+    checks.append(
+        {
+            "id": "flow_route_selected_present",
+            "passed": route_present,
+            "reason": "flow trace 包含 route_selected。"
+            if route_present
+            else "flow trace 缺少 route_selected。",
+        }
+    )
+
+    stop_present = "stop_reason" in event_names
+    checks.append(
+        {
+            "id": "flow_stop_reason_present",
+            "passed": stop_present,
+            "reason": "flow trace 包含 stop_reason。"
+            if stop_present
+            else "flow trace 缺少 stop_reason。",
+        }
+    )
+
+    if "assistant_requested_tools" in event_names:
+        plan_index = next(
+            (index for index, item in enumerate(events) if item["event"] == "agent_plan_created"),
+            None,
+        )
+        self_check_index = next(
+            (index for index, item in enumerate(events) if item["event"] == "agent_self_check"),
+            None,
+        )
+        tool_called_index = next(
+            (index for index, item in enumerate(events) if item["event"] == "tool_called"),
+            None,
+        )
+        plan_present = plan_index is not None
+        checks.append(
+            {
+                "id": "flow_agent_plan_present",
+                "passed": plan_present,
+                "reason": "tool 调用前存在 agent_plan_created。"
+                if plan_present
+                else "assistant 已请求 tool，但 flow trace 缺少 agent_plan_created。",
+            }
+        )
+
+        self_check_present = self_check_index is not None
+        checks.append(
+            {
+                "id": "flow_agent_self_check_present",
+                "passed": self_check_present,
+                "reason": "tool 调用前存在 agent_self_check。"
+                if self_check_present
+                else "assistant 已请求 tool，但 flow trace 缺少 agent_self_check。",
+            }
+        )
+
+        plan_ordered = (
+            plan_index is not None
+            and self_check_index is not None
+            and plan_index <= self_check_index
+        )
+        checks.append(
+            {
+                "id": "flow_agent_plan_before_self_check",
+                "passed": plan_ordered,
+                "reason": "agent_plan_created 出现在 agent_self_check 之前。"
+                if plan_ordered
+                else "agent_plan_created 没有出现在 agent_self_check 之前。",
+            }
+        )
+
+        self_check_ordered = (
+            self_check_index is not None
+            and tool_called_index is not None
+            and self_check_index < tool_called_index
+        )
+        checks.append(
+            {
+                "id": "flow_agent_self_check_before_tool_call",
+                "passed": self_check_ordered,
+                "reason": "agent_self_check 出现在首个 tool_called 之前。"
+                if self_check_ordered
+                else "agent_self_check 没有出现在首个 tool_called 之前。",
+            }
+        )
+
+    return {"passed": all(item["passed"] for item in checks), "checks": checks}
+
+
 def latest_attachment_payload(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
     for row in reversed(flow_rows):
         if row["event_name"] != "attachment_prepared":
@@ -706,6 +812,7 @@ def write_run_summary(
     evaluator: dict[str, Any],
     layer_checks: dict[str, Any],
     contract_results: dict[str, Any],
+    flow_results: dict[str, Any],
 ) -> None:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     report_json_path = REPORTS_DIR / f"{run_id}.json"
@@ -722,6 +829,7 @@ def write_run_summary(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "layer_checks": layer_checks,
         "contract_results": contract_results,
+        "flow_results": flow_results,
         "scenarios": scenarios,
         "passed": layer_checks.get("passed", True) and all(
             scenario_result.get("passed", False) for scenario_result in scenarios.values()
@@ -735,6 +843,7 @@ def write_run_summary(
         f"- 总体是否通过：{'是' if report_payload['passed'] else '否'}",
         f"- layer checks：{'通过' if layer_checks.get('passed', True) else '失败'}",
         f"- contract checks：{'通过' if contract_results.get('passed', True) else '失败'}",
+        f"- flow checks：{'通过' if flow_results.get('passed', True) else '失败'}",
         "",
         "## 场景结果",
     ]
@@ -811,6 +920,8 @@ def main() -> None:
     dump_json(run_dir / "flow_trace.json", build_flow_trace(metadata, flow_rows))
     contract_results = collect_contract_results()
     dump_json(run_dir / "contract_results.json", contract_results)
+    flow_results = collect_flow_results(flow_rows)
+    dump_json(run_dir / "flow_results.json", flow_results)
 
     gate_results: list[dict[str, Any]] = []
     gate_results.append(
@@ -823,6 +934,19 @@ def main() -> None:
                 "knowledge base action contracts passed."
                 if contract_results["passed"]
                 else "; ".join(item["reason"] for item in contract_results["checks"] if not item["passed"])
+            ),
+        }
+    )
+    gate_results.append(
+        {
+            "id": "flow_checks_must_pass",
+            "scope": "global",
+            "description": "flow trace must contain route, stop reason, and self-check before tool execution.",
+            "passed": flow_results["passed"],
+            "reason": (
+                "flow checks passed."
+                if flow_results["passed"]
+                else "; ".join(item["reason"] for item in flow_results["checks"] if not item["passed"])
             ),
         }
     )
@@ -890,7 +1014,7 @@ def main() -> None:
     }
     dump_json(run_dir / "gate_results.json", evaluator)
     dump_json(run_dir / "evaluator.json", evaluator)
-    write_run_summary(args.run_id, args.scenario_id, evaluator, layer_checks, contract_results)
+    write_run_summary(args.run_id, args.scenario_id, evaluator, layer_checks, contract_results, flow_results)
 
     print(f"Saved run artifacts to: {run_dir}")
     print(f"Overall passed: {evaluator['passed']}")

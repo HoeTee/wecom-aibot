@@ -166,6 +166,59 @@ class Agent:
                 summary[key] = str(value)[:200]
         return summary
 
+    def _build_self_check_payload(self, tool_calls: list[Any]) -> dict[str, Any]:
+        problems: list[str] = []
+        tool_names: list[str] = []
+        target_ok = True
+        params_ok = True
+        need_confirm = False
+        risk = "low"
+
+        for tool_call in tool_calls:
+            function_name = tool_call.function.name
+            tool_names.append(function_name)
+            lowered = function_name.lower()
+
+            if any(token in lowered for token in ("delete", "remove", "trash", "rename")):
+                need_confirm = True
+                risk = "high"
+            elif any(token in lowered for token in ("edit", "write", "create", "append", "replace", "expand")):
+                risk = "medium" if risk != "high" else risk
+
+            args_dict = self._parse_tool_arguments(tool_call.function.arguments, function_name)
+            if args_dict is None:
+                params_ok = False
+                target_ok = False
+                problems.append(f"{function_name}:invalid_arguments")
+                continue
+
+            validation_error = validate_doc_tool_arguments(
+                function_name=function_name,
+                args_dict=args_dict,
+                latest_user_message=self._latest_user_message(),
+            )
+            if validation_error:
+                params_ok = False
+                target_ok = False
+                problems.append(f"{function_name}:{validation_error}")
+
+            if lowered.endswith("edit_doc_content") and not any(
+                str(args_dict.get(key) or "").strip() for key in ("docid", "doc_id", "docId")
+            ):
+                target_ok = False
+                problems.append(f"{function_name}:missing_doc_id")
+
+        return {
+            "tool_names": tool_names,
+            "tool_count": len(tool_calls),
+            "target_ok": target_ok,
+            "params_ok": params_ok,
+            "sequence_ok": len(tool_calls) <= self.max_tool_calls,
+            "need_confirm": need_confirm,
+            "risk": risk,
+            "problems": problems,
+        }
+
     async def _execute_a_tool(self, tool_call: Any) -> str:
         function_name = tool_call.function.name
         self._log(f"Calling tool: {function_name}")
@@ -344,11 +397,22 @@ class Agent:
             if response_message.tool_calls:
                 self.messages.append(response_message.model_dump(exclude_unset=True))
                 self._emit_flow(
+                    "agent_plan_created",
+                    {
+                        "tool_names": [call.function.name for call in response_message.tool_calls],
+                        "tool_count": len(response_message.tool_calls),
+                    },
+                )
+                self._emit_flow(
                     "assistant_requested_tools",
                     {
                         "tool_names": [call.function.name for call in response_message.tool_calls],
                         "tool_count": len(response_message.tool_calls),
                     },
+                )
+                self._emit_flow(
+                    "agent_self_check",
+                    self._build_self_check_payload(response_message.tool_calls),
                 )
 
                 forced = await self._process_tool_calls(response_message.tool_calls)

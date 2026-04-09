@@ -6,13 +6,17 @@ from typing import Any
 
 from backend.caps.documents import (
     append_section,
+    append_document_section,
     build_section_block,
     choose_relevant_section,
+    expand_document_section,
     get_doc_markdown,
     insert_after_section,
     overwrite_document_markdown,
     parse_markdown_sections,
+    preview_document_replace,
     replace_section,
+    replace_document_section,
     section_preview,
 )
 from backend.caps.knowledge_base import match_pdf_records, resolve_record_by_index
@@ -146,17 +150,38 @@ async def _execute_merge(
 
     if location_mode == "append_end":
         title = section_title or f"补充：{_file_stem(source_record['file_name'])}"
-        new_markdown = append_section(markdown, title, summary, level=2)
+        await append_document_section(
+            host,
+            doc_id=target_doc["doc_id"],
+            doc_url=target_doc.get("doc_url"),
+            title=title,
+            body=summary,
+            location_mode="append_end",
+            level=2,
+        )
     elif location_mode == "new_section":
         title = section_title or _generate_section_title(markdown, source_record)
-        new_markdown = append_section(markdown, title, summary, level=2)
+        await append_document_section(
+            host,
+            doc_id=target_doc["doc_id"],
+            doc_url=target_doc.get("doc_url"),
+            title=title,
+            body=summary,
+            location_mode="new_section",
+            level=2,
+        )
     else:
-        section = choose_relevant_section(markdown, f"{user_request}\n{source_record['file_name']}")
         title = section_title or f"补充：{_file_stem(source_record['file_name'])}"
-        block = build_section_block(title, summary, level=max(2, int(section["level"]) + 1 if section else 2))
-        new_markdown = insert_after_section(markdown, section, block) if section else append_section(markdown, title, summary, level=2)
-
-    await overwrite_document_markdown(host, doc_id=target_doc["doc_id"], content=new_markdown)
+        await append_document_section(
+            host,
+            doc_id=target_doc["doc_id"],
+            doc_url=target_doc.get("doc_url"),
+            title=title,
+            body=summary,
+            location_mode="relevant_section",
+            query=f"{user_request}\n{source_record['file_name']}",
+            level=2,
+        )
 
 
 async def _prepare_replace_preview(
@@ -166,21 +191,13 @@ async def _prepare_replace_preview(
     source_record: dict[str, Any],
     scope_hint: str,
 ) -> dict[str, Any]:
-    markdown = await get_doc_markdown(host, doc_id=target_doc["doc_id"], doc_url=target_doc.get("doc_url"))
-    section = choose_relevant_section(markdown, f"{scope_hint}\n{source_record['file_name']}")
-    if not section:
-        raise RuntimeError("No section found for replacement")
-    return {
-        "section": {
-            "title": section["title"],
-            "level": section["level"],
-            "start": section["start"],
-            "end": section["end"],
-            "markdown": section["markdown"],
-            "body": section["body"],
-        },
-        "preview": section_preview(section),
-    }
+    return await preview_document_replace(
+        host,
+        doc_id=target_doc["doc_id"],
+        doc_url=target_doc.get("doc_url"),
+        scope_hint=scope_hint,
+        source_hint=source_record["file_name"],
+    )
 
 
 async def _execute_replace(
@@ -191,13 +208,16 @@ async def _execute_replace(
     section_payload: dict[str, Any],
     user_request: str,
 ) -> None:
-    markdown = await get_doc_markdown(host, doc_id=target_doc["doc_id"], doc_url=target_doc.get("doc_url"))
-    live_section = choose_relevant_section(markdown, section_payload.get("title") or source_record["file_name"])
-    section = live_section or section_payload
     summary = await _build_source_summary(host, source_record, user_request)
-    block = build_section_block(str(section["title"]), summary, level=int(section["level"]))
-    new_markdown = replace_section(markdown, section, block)
-    await overwrite_document_markdown(host, doc_id=target_doc["doc_id"], content=new_markdown)
+    await replace_document_section(
+        host,
+        doc_id=target_doc["doc_id"],
+        doc_url=target_doc.get("doc_url"),
+        title=str((section_payload or {}).get("title") or source_record["file_name"]),
+        body=summary,
+        section_payload=section_payload,
+        query=str((section_payload or {}).get("title") or source_record["file_name"]),
+    )
 
 
 async def _execute_expand(
@@ -209,17 +229,16 @@ async def _execute_expand(
     existing_section_title: str | None = None,
     new_section_title: str | None = None,
 ) -> None:
-    markdown = await get_doc_markdown(host, doc_id=target_doc["doc_id"], doc_url=target_doc.get("doc_url"))
     summary = await _build_source_summary(host, source_record, user_request)
-    if new_section_title:
-        new_markdown = append_section(markdown, new_section_title, summary, level=2)
-    else:
-        query = existing_section_title or f"{user_request}\n{source_record['file_name']}"
-        section = choose_relevant_section(markdown, query)
-        title = new_section_title or f"扩写补充：{_file_stem(source_record['file_name'])}"
-        block = build_section_block(title, summary, level=max(2, int(section["level"]) + 1 if section else 2))
-        new_markdown = insert_after_section(markdown, section, block) if section else append_section(markdown, title, summary, level=2)
-    await overwrite_document_markdown(host, doc_id=target_doc["doc_id"], content=new_markdown)
+    await expand_document_section(
+        host,
+        doc_id=target_doc["doc_id"],
+        doc_url=target_doc.get("doc_url"),
+        title=f"扩写补充：{_file_stem(source_record['file_name'])}",
+        body=summary,
+        query=existing_section_title or f"{user_request}\n{source_record['file_name']}",
+        new_section_title=new_section_title,
+    )
 
 
 async def handle_pending_document_action(

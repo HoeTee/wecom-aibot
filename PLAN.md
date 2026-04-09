@@ -1,5 +1,13 @@
 # PLAN
 
+## 当前进度
+
+- Phase 1：`kb.*` 动作化已落地
+- Phase 2：`doc.*` 动作化已落地
+- Phase 3：已补 `agent_plan_created` 和 `agent_self_check`
+- Phase 4：已补 `contract_results.json` 和 `flow_results.json`
+- Phase 5：已补 `flow` 文件日志与 `scripts/cleanup_artifacts.py`
+
 ## 目标
 
 这轮计划的目标不是继续往现有 `flow` 里堆更多流程分支，而是把仓库从“按流程写逻辑”逐步改成“按动作组织能力、按原则约束动作、按 HE 验证动作和流程”。

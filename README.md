@@ -194,6 +194,12 @@ MCP 连通性检查：
 .venv\Scripts\python.exe -m scripts.mcp_test
 ```
 
+清理测试产物：
+
+```powershell
+.venv\Scripts\python.exe scripts\cleanup_artifacts.py
+```
+
 ## 兼容层
 
 以下目录目前保留为兼容包装：
@@ -210,6 +216,19 @@ MCP 连通性检查：
 
 - `backend/runtime/cli.py`
 - `backend/tools/kb_cli.py`
+- `backend/tools/doc_cli.py`
+- `backend/tools/rag_cli.py`
+
+当前动作层已经覆盖：
+
+- `kb.*`
+- `doc.*`
+- `rag.*`
+
+当前 `agent` 侧新增了：
+
+- `agent_plan_created`
+- `agent_self_check`
 
 ## 本地环境目录
 

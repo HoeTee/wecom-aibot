@@ -13,3 +13,6 @@ gates:
 
   - id: must_follow_requested_structure
     description: 当用户要求特定文档结构时，最终文档必须遵循该结构。
+
+  - id: flow_checks_must_pass
+    description: flow trace 必须包含 route、stop reason，以及 tool 执行前的 agent self-check。
