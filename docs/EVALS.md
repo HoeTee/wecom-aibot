@@ -15,6 +15,8 @@
 
 HE 已独立到 `he/`：
 
+- `he/contracts/*`
+- `he/flows/*`
 - 共享 hard gates：`he/gates/global.yaml`
 - 场景定义：`he/scenarios/*`
 - 人工 review 模板：`he/review_template.md`
@@ -166,6 +168,7 @@ python scripts/run_eval_case.py --scenario-id kb_rename_confirmation --session-i
 - `metadata.json`
 - `user_request.txt`
 - `assistant_reply.txt`
+- `contract_results.json`
 - `flow_trace.json`
 - `tool_trace.json`
 - `rag_query.json`
@@ -193,6 +196,10 @@ python scripts/run_eval_case.py --scenario-id kb_rename_confirmation --session-i
 推荐位置：
 
 - `he/runs/<run_id>/<scenario_id>/flow_trace.json`
+
+当前第一阶段也开始导出：
+
+- `he/runs/<run_id>/<scenario_id>/contract_results.json`
 
 默认结构：
 

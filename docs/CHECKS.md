@@ -42,6 +42,17 @@
 - `metadata`
 - `events`
 
+## contract_results
+
+动作层开始 CLI 化后，每次关键评测也应导出独立的 `contract_results.json`。
+
+当前第一阶段先覆盖 `kb.*`：
+
+- `kb.list`
+- `kb.list_uploads`
+- `kb.match_related`
+- `kb.export`
+
 ### metadata
 
 默认至少包含：

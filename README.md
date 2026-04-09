@@ -37,8 +37,8 @@ wecom-aibot/
     policy/                 # policy
     state/                  # state
     caps/                   # caps
-    runtime/                # runtime
-    tools/                  # tools
+    runtime/                # runtime（MCP + CLI dispatch）
+    tools/                  # tools（CLI implementations + local tool code）
 
   gateway/
     long_connection.ts      # 企业微信网关入口
@@ -78,6 +78,8 @@ HE 独立于运行时层，不属于 `backend/` 的七层。
 he/
   README.md
   review_template.md
+  contracts/
+  flows/
   gates/
   scenarios/
   runs/
@@ -85,6 +87,8 @@ he/
 ```
 
 - `gates/`：共享 hard gates
+- `contracts/`：动作级 contract checks
+- `flows/`：flow checks
 - `scenarios/`：固定回归场景
 - `runs/`：单次运行证据包
 - `reports/`：总结报告和 maintenance 输出
@@ -201,6 +205,11 @@ MCP 连通性检查：
 
 - `backend/runtime/`
 - `backend/tools/`
+
+当前第一阶段已经开始把知识库能力收敛成 CLI 风格动作：
+
+- `backend/runtime/cli.py`
+- `backend/tools/kb_cli.py`
 
 ## 本地环境目录
 

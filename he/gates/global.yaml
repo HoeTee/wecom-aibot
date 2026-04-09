@@ -1,6 +1,6 @@
 gates:
   - id: required_stdio_mcp_must_initialize
-    description: 所有 `required: true` 的 stdio MCP server 必须先完成 initialize，业务场景才能算有效。
+    description: "所有 `required: true` 的 stdio MCP server 必须先完成 initialize，业务场景才能算有效。"
 
   - id: must_bind_doc_triple
     description: 文档操作成功时，如果相关信息可得，必须保留 `doc_id`、`doc_url`、`doc_name` 三元组。

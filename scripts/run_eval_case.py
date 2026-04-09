@@ -25,7 +25,13 @@ except ImportError:  # pragma: no cover - module import path differs when run wi
     from scripts.check_layers import run_layer_checks
 
 from backend.memory import init_db
-from backend.caps.knowledge_base import list_pdf_records
+from backend.caps.knowledge_base import (
+    export_kb_record,
+    list_kb_files,
+    list_pdf_records,
+    list_uploaded_kb_files,
+    match_related_kb_files,
+)
 from backend.runtime.config import load_mcp_host_config, load_mcp_server_configs_from_env
 from backend.runtime.connection import MCPServerConnection
 
@@ -373,6 +379,82 @@ def latest_route_selected(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
     return {}
 
 
+def collect_contract_results() -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+
+    kb_list = list_kb_files()
+    list_passed = (
+        kb_list.get("action") == "kb.list"
+        and isinstance(kb_list.get("records"), list)
+        and isinstance(kb_list.get("total"), int)
+    )
+    checks.append(
+        {
+            "id": "kb_list_contract",
+            "passed": list_passed,
+            "reason": "kb.list 返回了稳定 records/total 结构。"
+            if list_passed
+            else "kb.list 没有返回稳定 records/total 结构。",
+        }
+    )
+
+    kb_uploads = list_uploaded_kb_files(limit=10)
+    upload_records = kb_uploads.get("records") or []
+    uploads_passed = kb_uploads.get("action") == "kb.list_uploads" and all(
+        item.get("source_type") == "upload" for item in upload_records
+    )
+    checks.append(
+        {
+            "id": "kb_list_uploads_contract",
+            "passed": uploads_passed,
+            "reason": "kb.list_uploads 只返回 upload source_type。"
+            if uploads_passed
+            else "kb.list_uploads 返回结果中混入了非 upload source_type。",
+        }
+    )
+
+    sample_query = ""
+    records = kb_list.get("records") or []
+    if records:
+        sample_query = str(records[0].get("file_name") or "")
+    kb_match = match_related_kb_files(sample_query or "pdf", limit=3)
+    match_passed = (
+        kb_match.get("action") == "kb.match_related"
+        and isinstance(kb_match.get("records"), list)
+        and "query" in kb_match
+    )
+    checks.append(
+        {
+            "id": "kb_match_related_contract",
+            "passed": match_passed,
+            "reason": "kb.match_related 返回了稳定候选结构。"
+            if match_passed
+            else "kb.match_related 没有返回稳定候选结构。",
+        }
+    )
+
+    export_passed = True
+    export_reason = "当前无知识库文件，跳过 kb.export 合约检查。"
+    if records:
+        kb_export = export_kb_record(records[0])
+        export_path = str(kb_export.get("path") or "").strip()
+        export_passed = kb_export.get("action") == "kb.export" and bool(export_path) and Path(export_path).exists()
+        export_reason = (
+            "kb.export 返回了有效的文件路径。"
+            if export_passed
+            else "kb.export 没有返回有效的文件路径。"
+        )
+    checks.append(
+        {
+            "id": "kb_export_contract",
+            "passed": export_passed,
+            "reason": export_reason,
+        }
+    )
+
+    return {"passed": all(item["passed"] for item in checks), "checks": checks}
+
+
 def evaluate_global_gate(
     gate_id: str,
     assistant_reply: str,
@@ -594,6 +676,9 @@ def suggested_fix_layers(failed_gate_ids: list[str], layer_check_passed: bool) -
     if not layer_check_passed:
         primary = {"layer": "runtime", "directory": "backend/runtime/"}
         secondary = {"layer": "tools", "directory": "backend/tools/"}
+    elif "kb_action_contracts_must_pass" in failed_gate_ids:
+        primary = {"layer": "caps", "directory": "backend/caps/knowledge_base.py"}
+        secondary = {"layer": "runtime", "directory": "backend/runtime/cli.py"}
     elif "required_stdio_mcp_must_initialize" in failed_gate_ids:
         primary = {"layer": "tools", "directory": "backend/mcp_server_local/"}
         secondary = {"layer": "runtime", "directory": "backend/runtime/"}
@@ -615,7 +700,13 @@ def suggested_fix_layers(failed_gate_ids: list[str], layer_check_passed: bool) -
     return {"primary": primary, "secondary": secondary}
 
 
-def write_run_summary(run_id: str, scenario_id: str, evaluator: dict[str, Any], layer_checks: dict[str, Any]) -> None:
+def write_run_summary(
+    run_id: str,
+    scenario_id: str,
+    evaluator: dict[str, Any],
+    layer_checks: dict[str, Any],
+    contract_results: dict[str, Any],
+) -> None:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     report_json_path = REPORTS_DIR / f"{run_id}.json"
     report_md_path = REPORTS_DIR / f"{run_id}.md"
@@ -630,6 +721,7 @@ def write_run_summary(run_id: str, scenario_id: str, evaluator: dict[str, Any], 
         "run_id": run_id,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "layer_checks": layer_checks,
+        "contract_results": contract_results,
         "scenarios": scenarios,
         "passed": layer_checks.get("passed", True) and all(
             scenario_result.get("passed", False) for scenario_result in scenarios.values()
@@ -642,6 +734,7 @@ def write_run_summary(run_id: str, scenario_id: str, evaluator: dict[str, Any], 
         "",
         f"- 总体是否通过：{'是' if report_payload['passed'] else '否'}",
         f"- layer checks：{'通过' if layer_checks.get('passed', True) else '失败'}",
+        f"- contract checks：{'通过' if contract_results.get('passed', True) else '失败'}",
         "",
         "## 场景结果",
     ]
@@ -716,8 +809,23 @@ def main() -> None:
     dump_json(run_dir / "rag_query.json", rag_query_payload)
     (run_dir / "written_doc_content.md").write_text(str(write_payload["args"].get("content", "") or ""), encoding="utf-8")
     dump_json(run_dir / "flow_trace.json", build_flow_trace(metadata, flow_rows))
+    contract_results = collect_contract_results()
+    dump_json(run_dir / "contract_results.json", contract_results)
 
     gate_results: list[dict[str, Any]] = []
+    gate_results.append(
+        {
+            "id": "kb_action_contracts_must_pass",
+            "scope": "global",
+            "description": "knowledge base action contracts must return stable structures.",
+            "passed": contract_results["passed"],
+            "reason": (
+                "knowledge base action contracts passed."
+                if contract_results["passed"]
+                else "; ".join(item["reason"] for item in contract_results["checks"] if not item["passed"])
+            ),
+        }
+    )
     if stdio_boot["checks"]:
         failed_servers = [item["server_name"] for item in stdio_boot["checks"] if not item["passed"]]
         gate_results.append(
@@ -782,7 +890,7 @@ def main() -> None:
     }
     dump_json(run_dir / "gate_results.json", evaluator)
     dump_json(run_dir / "evaluator.json", evaluator)
-    write_run_summary(args.run_id, args.scenario_id, evaluator, layer_checks)
+    write_run_summary(args.run_id, args.scenario_id, evaluator, layer_checks, contract_results)
 
     print(f"Saved run artifacts to: {run_dir}")
     print(f"Overall passed: {evaluator['passed']}")

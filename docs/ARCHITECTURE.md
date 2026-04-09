@@ -153,6 +153,10 @@
 
 - `backend/runtime/*`
 
+当前第一阶段开始在这一层收敛 CLI dispatch：
+
+- `backend/runtime/cli.py`
+
 兼容包装仍保留在：
 
 - `backend/mcp_client/*`
@@ -174,6 +178,10 @@
 当前对应：
 
 - `backend/tools/*`
+
+当前第一阶段开始在这一层收敛本地 CLI 风格实现：
+
+- `backend/tools/kb_cli.py`
 
 兼容包装仍保留在：
 
@@ -218,6 +226,8 @@ backend/
   tools/
 
 he/
+  contracts/
+  flows/
   gates/
   scenarios/
   runs/
