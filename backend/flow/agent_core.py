@@ -13,6 +13,9 @@ from openai import AsyncOpenAI
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from backend.policy.document import validate_doc_tool_arguments
+from backend.policy.rag import needs_rag_query_rewrite, rewrite_rag_query
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -143,90 +146,11 @@ class Agent:
             print(f"[{self.name}] Failed to parse tool arguments for {function_name}")
             return None
 
-    def _needs_rag_query_rewrite(self, function_name: str, args_dict: dict[str, Any]) -> bool:
-        return (
-            function_name.endswith("llamaindex_rag_query")
-            and isinstance(args_dict.get("query"), str)
-            and bool(str(args_dict.get("query", "")).strip())
-        )
-
-    def _rewrite_rag_query(self, query: str) -> str:
-        rewritten = str(query or "").strip()
-        if not rewritten:
-            return rewritten
-
-        replacements = {
-            "重新生成一份企业微信文档": "生成一份基于来源材料的文档内容",
-            "生成一份企业微信文档": "生成一份基于来源材料的文档内容",
-            "给刚才那份文档": "",
-            "给刚才那个文档": "",
-            "不要新建文档": "",
-            "回复要简洁，并明确告诉我是否已经创建文档。": "",
-            "回复要简洁，并明确告诉我是否已经创建文档": "",
-            "回复要简洁。": "",
-            "回复要简洁": "",
-        }
-        for old, new in replacements.items():
-            rewritten = rewritten.replace(old, new)
-
-        filtered_lines: list[str] = []
-        for raw_line in rewritten.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            if "明确告诉我是否已经创建文档" in line:
-                continue
-            if line.startswith("回复要"):
-                continue
-            filtered_lines.append(line)
-
-        rewritten = "\n".join(filtered_lines).strip()
-        return rewritten or str(query).strip()
-
     def _latest_user_message(self) -> str:
         for message in reversed(self.messages):
             if message.get("role") == "user":
                 return str(message.get("content", "")).strip()
         return ""
-
-    def _is_fresh_document_request(self) -> bool:
-        latest_user_message = self._latest_user_message()
-        fresh_tokens = ("重新生成", "重新写一份", "重新出一份", "新生成一份", "新建一份")
-        return "文档" in latest_user_message and any(token in latest_user_message for token in fresh_tokens)
-
-    def _user_requested_table(self) -> bool:
-        latest_user_message = self._latest_user_message()
-        return any(token in latest_user_message for token in ("表格", "对比表", "comparison table"))
-
-    def _user_requested_structured_summary(self) -> bool:
-        latest_user_message = self._latest_user_message()
-        required_tokens = ("背景", "每篇论文摘要", "横向对比", "结论与建议")
-        return all(token in latest_user_message for token in required_tokens)
-
-    def _validate_doc_tool_arguments(self, function_name: str, args_dict: dict[str, Any]) -> str | None:
-        name = function_name.lower()
-        if "edit_doc" not in name and "doc_content" not in name:
-            return None
-
-        content = str(args_dict.get("content", "") or "").strip()
-        if not content:
-            return None
-
-        if "..." in content:
-            return "文档内容校验失败：不允许写入占位符 `...`。"
-
-        if self._user_requested_structured_summary():
-            required_sections = ("背景", "每篇论文摘要", "横向对比", "结论与建议")
-            missing_sections = [section for section in required_sections if section not in content]
-            if missing_sections:
-                return "文档内容校验失败：缺少必需章节：" + "、".join(missing_sections)
-
-        if not self._user_requested_table():
-            forbidden_table_markers = ("## 5.", "### 5.", "技术对比表")
-            if any(marker in content for marker in forbidden_table_markers):
-                return "文档内容校验失败：当前轮次不允许提前生成对比表。"
-
-        return None
 
     def _summarize_args(self, args_dict: dict[str, Any]) -> dict[str, Any]:
         summary: dict[str, Any] = {}
@@ -262,9 +186,9 @@ class Agent:
         call_args = dict(args_dict)
         persisted_args = dict(args_dict)
 
-        if self._needs_rag_query_rewrite(function_name, args_dict):
+        if needs_rag_query_rewrite(function_name, args_dict):
             original_query = str(args_dict["query"]).strip()
-            rewritten_query = self._rewrite_rag_query(original_query)
+            rewritten_query = rewrite_rag_query(original_query)
             if rewritten_query and rewritten_query != original_query:
                 call_args["query"] = rewritten_query
                 persisted_args["rewritten_query"] = rewritten_query
@@ -277,7 +201,11 @@ class Agent:
                 )
                 self._log(f"Rewrote RAG query for '{function_name}'")
 
-        validation_error = self._validate_doc_tool_arguments(function_name, call_args)
+        validation_error = validate_doc_tool_arguments(
+            function_name=function_name,
+            args_dict=call_args,
+            latest_user_message=self._latest_user_message(),
+        )
         if validation_error:
             self._log(validation_error)
             self._emit_flow(

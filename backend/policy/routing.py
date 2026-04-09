@@ -2,15 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.policy.document import is_fresh_document_request
 from backend.state.store import latest_uploaded_file
-
-
-def is_fresh_document_request(content: str) -> bool:
-    text = str(content or "").strip()
-    if not text:
-        return False
-    fresh_tokens = ("重新生成", "重新写一份", "重新出一份", "新生成一份", "新建一份")
-    return "文档" in text and any(token in text for token in fresh_tokens)
 
 
 def is_add_to_knowledge_base_request(content: str) -> bool:
