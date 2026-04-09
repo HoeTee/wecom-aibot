@@ -2,9 +2,9 @@ id: pdf_3papers_create_summary_doc
 goal: 将当前知识库中的三篇固定论文总结成一份新的企业微信文档。
 prompt_version: assistant_v1
 assets:
-  - knowledge_base/papers/2505.12540v4.pdf
-  - knowledge_base/papers/2506.00054v1.pdf
-  - knowledge_base/papers/2603.03329v1.pdf
+  - knowledge_base/2505.12540v4.pdf
+  - knowledge_base/2506.00054v1.pdf
+  - knowledge_base/2603.03329v1.pdf
 turns:
   - turns/turn_1.txt
 global_gates:

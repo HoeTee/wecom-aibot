@@ -11,8 +11,7 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-KNOWLEDGE_BASE_PAPER_DIR = PROJECT_ROOT / "knowledge_base" / "papers"
-KNOWLEDGE_BASE_UPLOAD_DIR = KNOWLEDGE_BASE_PAPER_DIR / "uploads"
+KNOWLEDGE_BASE_DIR = PROJECT_ROOT / "knowledge_base"
 GENERIC_QUERY_TOKENS = {
     "pdf",
     "文档",
@@ -53,7 +52,11 @@ def upload_storage_name(filename: str) -> str:
 
 
 def knowledge_base_pdf_paths() -> list[Path]:
-    return sorted(path for path in KNOWLEDGE_BASE_PAPER_DIR.rglob("*.pdf") if path.is_file())
+    return sorted(
+        path
+        for path in KNOWLEDGE_BASE_DIR.glob("*.pdf")
+        if path.is_file()
+    )
 
 
 def relative_project_path(path: Path) -> str:
@@ -75,7 +78,7 @@ def _display_name(path: Path) -> str:
 
 
 def _source_type(path: Path) -> str:
-    return "upload" if KNOWLEDGE_BASE_UPLOAD_DIR in path.parents else "base"
+    return "upload" if path.name.startswith("upload__") else "base"
 
 
 def _tokenize(value: str) -> set[str]:
@@ -143,10 +146,14 @@ def _list_records(source_type: str | None = None) -> list[dict[str, Any]]:
 
 
 def _recent_uploads(limit: int = 5) -> list[dict[str, Any]]:
-    if not KNOWLEDGE_BASE_UPLOAD_DIR.exists():
+    if not KNOWLEDGE_BASE_DIR.exists():
         return []
     paths = sorted(
-        (path for path in KNOWLEDGE_BASE_UPLOAD_DIR.glob("*.pdf") if path.is_file()),
+        (
+            path
+            for path in KNOWLEDGE_BASE_DIR.glob("upload__*.pdf")
+            if path.is_file()
+        ),
         key=lambda item: item.stat().st_mtime,
         reverse=True,
     )
@@ -225,7 +232,7 @@ def _rename(record: dict[str, Any], new_file_name: str) -> dict[str, Any]:
         raise FileNotFoundError(source_path)
 
     normalized_new_name = normalize_pdf_filename(new_file_name)
-    target_path = KNOWLEDGE_BASE_UPLOAD_DIR / upload_storage_name(normalized_new_name)
+    target_path = KNOWLEDGE_BASE_DIR / upload_storage_name(normalized_new_name)
     if target_path.resolve() == source_path.resolve():
         return {
             "old_file_name": record["file_name"],
@@ -257,8 +264,8 @@ def _delete(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _store_upload(file_bytes: bytes, original_name: str) -> dict[str, str | None]:
-    KNOWLEDGE_BASE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    target_path = KNOWLEDGE_BASE_UPLOAD_DIR / upload_storage_name(original_name)
+    KNOWLEDGE_BASE_DIR.mkdir(parents=True, exist_ok=True)
+    target_path = KNOWLEDGE_BASE_DIR / upload_storage_name(original_name)
     incoming_sha = sha256_bytes(file_bytes)
 
     if target_path.exists():

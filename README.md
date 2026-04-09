@@ -52,6 +52,12 @@ wecom-aibot/
   data/                     # 本地状态、索引、日志
 ```
 
+知识库目录约定：
+
+- 所有知识库 PDF 直接放在 `knowledge_base/` 根目录
+- 固定材料和上传材料不再分 `papers/`、`uploads/` 子目录
+- 上传文件只通过文件名前缀 `upload__` 区分
+
 ## data 目录
 
 运行产物统一收在 `data/` 下：
@@ -239,7 +245,7 @@ MCP 连通性检查：
 - `data/`
 - `he/runs/`
 - `he/reports/`
-- `knowledge_base/papers/uploads/`
+- `knowledge_base/upload__*.pdf`
 
 ## Git 工作流
 

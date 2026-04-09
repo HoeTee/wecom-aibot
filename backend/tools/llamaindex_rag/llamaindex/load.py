@@ -5,7 +5,7 @@ from llama_index.core import SimpleDirectoryReader
 from llama_index.readers.file import PDFReader
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_PAPER_DIR = PROJECT_ROOT / "knowledge_base" / "papers"
+DEFAULT_PAPER_DIR = PROJECT_ROOT / "knowledge_base"
 LEGACY_DATA_DIR = PROJECT_ROOT / "docs"
 
 

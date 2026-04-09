@@ -647,7 +647,7 @@ required stdio MCP server 还必须通过：
 - `data/`
 - `he/runs/`
 - `he/reports/`
-- `knowledge_base/papers/uploads/`
+- `knowledge_base/upload__*.pdf`
 
 ## 风险与注意点
 

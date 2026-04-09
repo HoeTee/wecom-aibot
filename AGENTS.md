@@ -76,7 +76,7 @@
 
 ## 非必要不要修改的文件
 
-- `knowledge_base/papers/*`
+- `knowledge_base/*.pdf`
 - `config/mcp_servers.json`
 - `gateway/long_connection.ts`
 - `data/`
