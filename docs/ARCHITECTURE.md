@@ -284,3 +284,16 @@ HE 还要看层与层之间有没有断链。
   - 有没有正确转发到实现层
 
 所以分层不是为了抽象本身，而是为了让错误能被定位和验证。
+
+## 运行产物位置
+
+运行时产物统一收在 `data/` 下：
+
+- `data/memory.sqlite3`
+- `data/index/manifest.json`
+- `data/index/persist/*`
+- `data/logs/mcp/mcp_client.log`
+
+`manifest/`、`persist/`、`logs/` 不再作为根目录一级目录参与结构表达。
+
+`he/runs/` 和 `he/reports/` 也属于可清理的运行产物，不属于稳定代码结构。

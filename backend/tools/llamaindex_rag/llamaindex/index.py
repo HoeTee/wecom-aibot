@@ -11,8 +11,8 @@ from .chunk import LlamaIndexChunker
 from .load import LlamaIndexLoader
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_PERSIST_DIR = PROJECT_ROOT / "persist"
-DEFAULT_MANIFEST_PATH = PROJECT_ROOT / "manifest" / "manifest.json"
+DEFAULT_PERSIST_DIR = PROJECT_ROOT / "data" / "index" / "persist"
+DEFAULT_MANIFEST_PATH = PROJECT_ROOT / "data" / "index" / "manifest.json"
 MANIFEST_VERSION = 2
 
 

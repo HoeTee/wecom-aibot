@@ -1,30 +1,30 @@
 # AGENTS
 
-这个仓库是一个面向企业微信文档工作流的 agent。核心闭环是：
+这个仓库是一个面向企业微信文档工作流的 agent。
+
+核心闭环：
 
 1. 读取用户输入
 2. 检索或总结来源材料
 3. 创建或编辑企业微信文档
 4. 通过 `doc_id`、`doc_url`、`doc_name` 维持文档连续性
-5. 通过独立的 `he/` 层验证流程、回归和层级约束
+5. 通过独立的 `he/` 层做回归和检查
 
-`AGENTS.md` 只做索引，不做长篇手册。
+`AGENTS.md` 只做索引，不做长手册。
 
 ## Source Of Record
 
-以下文件是这个仓库的知识基线：
-
-- [docs/PRODUCT.md](C:/Users/18014/wecom-aibot/docs/PRODUCT.md)
-- [docs/DOC_WRITING.md](C:/Users/18014/wecom-aibot/docs/DOC_WRITING.md)
-- [docs/REPLY_STYLE.md](C:/Users/18014/wecom-aibot/docs/REPLY_STYLE.md)
-- [docs/MCP_TOOLS.md](C:/Users/18014/wecom-aibot/docs/MCP_TOOLS.md)
-- [docs/MEMORY.md](C:/Users/18014/wecom-aibot/docs/MEMORY.md)
-- [docs/ARCHITECTURE.md](C:/Users/18014/wecom-aibot/docs/ARCHITECTURE.md)
-- [docs/ROUTING_RULES.md](C:/Users/18014/wecom-aibot/docs/ROUTING_RULES.md)
-- [docs/FLOWS.md](C:/Users/18014/wecom-aibot/docs/FLOWS.md)
-- [docs/CHECKS.md](C:/Users/18014/wecom-aibot/docs/CHECKS.md)
-- [docs/EVALS.md](C:/Users/18014/wecom-aibot/docs/EVALS.md)
-- [he/gates/global.yaml](C:/Users/18014/wecom-aibot/he/gates/global.yaml)
+- [docs/PRODUCT.md](/C:/Users/18014/wecom-aibot/docs/PRODUCT.md)
+- [docs/DOC_WRITING.md](/C:/Users/18014/wecom-aibot/docs/DOC_WRITING.md)
+- [docs/REPLY_STYLE.md](/C:/Users/18014/wecom-aibot/docs/REPLY_STYLE.md)
+- [docs/MCP_TOOLS.md](/C:/Users/18014/wecom-aibot/docs/MCP_TOOLS.md)
+- [docs/MEMORY.md](/C:/Users/18014/wecom-aibot/docs/MEMORY.md)
+- [docs/ARCHITECTURE.md](/C:/Users/18014/wecom-aibot/docs/ARCHITECTURE.md)
+- [docs/ROUTING_RULES.md](/C:/Users/18014/wecom-aibot/docs/ROUTING_RULES.md)
+- [docs/FLOWS.md](/C:/Users/18014/wecom-aibot/docs/FLOWS.md)
+- [docs/CHECKS.md](/C:/Users/18014/wecom-aibot/docs/CHECKS.md)
+- [docs/EVALS.md](/C:/Users/18014/wecom-aibot/docs/EVALS.md)
+- [he/gates/global.yaml](/C:/Users/18014/wecom-aibot/he/gates/global.yaml)
 
 ## 目录约定
 
@@ -71,6 +71,8 @@
 - `he/gates/*`
 - `he/scenarios/*`
 - `he/review_template.md`
+- `README.md`
+- `.gitignore`
 
 ## 非必要不要修改的文件
 
@@ -78,8 +80,6 @@
 - `config/mcp_servers.json`
 - `gateway/long_connection.ts`
 - `data/`
-- `manifest/`
-- `persist/`
 - `he/runs/`
 - `he/reports/`
 
@@ -93,12 +93,4 @@
 - runtime / tools
 - HE checks
 
-改完后，必须重跑同一批固定场景，再比较结果。
-
-当前 workflow：
-
-1. coding agent 做一轮收敛修改
-2. 跑固定 `scenarios`
-3. 先看 hard gates、`flow_trace`、`layer_checks`
-4. 自动检查收敛后，再做最终 human review
-5. 只有结论明确后，才进入下一轮修改
+改完后必须重跑固定场景，再比较结果。

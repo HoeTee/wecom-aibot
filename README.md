@@ -3,14 +3,12 @@
 这是一个面向企业微信文档工作流的 agent 项目。主链路是：
 
 1. 接收用户消息或文件
-2. 理解意图并选择正确流程
-3. 检索知识库或调用文档能力
+2. 判断正确流程
+3. 查询知识库或调用文档能力
 4. 创建或编辑企业微信文档
-5. 用独立的 HE 层做回归、检查和报告
+5. 通过独立的 HE 层做回归、检查和报告
 
 ## 分层关系
-
-当前仓库按这组关系理解：
 
 - `entry receives`
 - `flow orchestrates`
@@ -21,96 +19,98 @@
 - `tools execute`
 - `he evaluates`
 
-这几条不是口号，而是目录约束：
+这组关系不是口号，而是目录约束。
 
-- `entry` 只负责接收和返回
-- `flow` 只负责流程编排
-- `policy` 只负责规则
-- `state` 只负责会话事实和持久状态
-- `caps` 只负责定义业务能力边界
-- `runtime` 只负责 MCP 连接、暴露和转发
-- `tools` 只负责真正执行能力
-- `he` 是独立外部层，不参与生产运行
-
-## 仓库结构
+## 逻辑结构
 
 ```text
 wecom-aibot/
   README.md
   AGENTS.md
 
-  backend/                     # 生产代码层
-    app.py                     # 稳定 Flask 入口 facade
-    agent.py                   # 稳定 agent facade
-    memory.py                  # 稳定 memory facade
-
-    entry/                     # entry
-    flow/                      # flow
-    policy/                    # policy
-      routing.py
-      document.py
-      rag.py
-      chat.py
-      upload.py
-    state/                     # state
-    caps/                      # caps
-      documents.py
-      knowledge_base.py
-    runtime/                   # runtime
-    tools/                     # tools
-
-    mcp_client/                # 兼容包装层，保持旧 import 不断
-    mcp_server_local/          # 兼容包装层，保持旧 MCP 入口不变
+  backend/                  # 生产代码
+    app.py                  # 稳定 Flask 入口 facade
+    agent.py                # 稳定 agent facade
+    memory.py               # 稳定 memory facade
+    entry/                  # entry
+    flow/                   # flow
+    policy/                 # policy
+    state/                  # state
+    caps/                   # caps
+    runtime/                # runtime
+    tools/                  # tools
 
   gateway/
-    long_connection.ts         # 企业微信网关入口
+    long_connection.ts      # 企业微信网关入口
 
-  docs/                        # 规则和架构基线
-    PRODUCT.md
-    DOC_WRITING.md
-    REPLY_STYLE.md
-    MCP_TOOLS.md
-    MEMORY.md
-    EVALS.md
-    ROUTING_RULES.md
-    FLOWS.md
-    CHECKS.md
-    ARCHITECTURE.md
-
-  he/                          # Harness Engineering 独立层
-    README.md
-    review_template.md
-    gates/
-    scenarios/
-    runs/
-    reports/
-
-  scripts/                     # 稳定脚本入口
-    run_eval_case.py
-    check_layers.py
-    mcp_test.py
-
-  prompts/
-    system/
-
-  knowledge_base/
-    papers/
-      uploads/
-
-  config/
-    mcp_servers.example.json
-    mcp_servers.json
-
-  data/
-  manifest/
-  persist/
+  docs/                     # 规则和架构文档
+  he/                       # 独立 HE 层
+  knowledge_base/           # 固定知识库材料
+  prompts/                  # prompt 文件
+  scripts/                  # 稳定脚本入口
+  config/                   # 本地配置模板
+  data/                     # 本地状态、索引、日志
 ```
+
+## data 目录
+
+运行产物统一收在 `data/` 下：
+
+```text
+data/
+  memory.sqlite3            # 会话状态
+  index/
+    manifest.json           # 索引 manifest
+    persist/                # 向量索引持久化
+  logs/
+    mcp/
+      mcp_client.log        # MCP 客户端日志
+```
+
+`manifest/`、`persist/`、`logs/` 不再作为根目录一级结构存在。
+
+## HE 目录
+
+HE 独立于运行时层，不属于 `backend/` 的七层。
+
+```text
+he/
+  README.md
+  review_template.md
+  gates/
+  scenarios/
+  runs/
+  reports/
+```
+
+- `gates/`：共享 hard gates
+- `scenarios/`：固定回归场景
+- `runs/`：单次运行证据包
+- `reports/`：总结报告和 maintenance 输出
+
+## 当前能力
+
+当前已经落地的主能力包括：
+
+- PDF 上传后入知识库
+- 重复上传和同名更新提示
+- 知识库文件列表查询
+- 相关文档候选查询
+- 原 PDF 导出前澄清与原文件返回
+- 删除知识库文件前确认
+- 本地 RAG 检索与总结
+- 企业微信文档创建与编辑
+- 把知识库内容并入当前文档
+- 用知识库内容替换当前文档相关部分
+- 把知识库内容扩写成当前文档的一节
+- `doc_id` / `doc_url` / `doc_name` 连续性维护
+- `flow_trace`
+- `run_eval_case`
+- `check_layers`
 
 ## Source of Record
 
-规则文档和架构说明在 `docs/`，HE 数据和运行结果在 `he/`。
-
-关键基线文件：
+关键规则文档：
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/ROUTING_RULES.md](docs/ROUTING_RULES.md)
@@ -120,27 +120,6 @@ wecom-aibot/
 - [docs/MEMORY.md](docs/MEMORY.md)
 - [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md)
 - [he/gates/global.yaml](he/gates/global.yaml)
-
-## 当前能力
-
-当前已经落下来的能力包括：
-
-- 企业微信文本消息接入
-- PDF 上传后自动入知识库
-- PDF 重复上传和同名更新提示
-- 知识库文件列表查询
-- 知识库相关候选文档查询
-- 原 PDF 导出
-- 知识库文件删除前确认
-- 本地 `llamaindex_rag` 检索与总结
-- 企业微信文档创建与编辑
-- 把知识库内容加入当前文档
-- 用知识库内容替换当前文档相关部分
-- 把知识库内容扩写成当前文档的一节
-- `doc_id` / `doc_url` / `doc_name` 连续性维护
-- 单次请求的 `flow_trace`
-- `run_eval_case` 导出 run artifacts
-- `check_layers` 层级违规检查
 
 ## 启动
 
@@ -181,54 +160,12 @@ npm run gateway
 Invoke-WebRequest http://127.0.0.1:5000/health
 ```
 
-## HE
-
-HE 层现在明确独立在 `he/` 下。
-
-它负责：
-
-- `gates/`：共享 hard gates
-- `scenarios/`：固定回归场景
-- `runs/`：单次运行证据包
-- `reports/`：汇总报告和 maintenance 输出
-
-当前已经纳入 `he/scenarios/` 的代表性能力包括：
-
-- 三篇论文综述生成
-- 上传 PDF 后加入知识库确认
-- 重复上传和同名更新提示
-- 知识库列表
-- 相关候选文档查询
-- 原 PDF 导出
-- 删除前确认
-- 把知识库内容并入当前文档
-- 替换当前文档相关部分
-- 扩写成新章节并确认标题
-
-单次评测执行入口保持不变：
-
-```powershell
-.venv\Scripts\python.exe scripts\run_eval_case.py --scenario-id <scenario_id> --session-id <session_id>
-```
-
-层级检查入口保持不变：
-
-```powershell
-.venv\Scripts\python.exe scripts\check_layers.py
-```
-
 ## 常用脚本
-
-MCP 连通性检查：
-
-```powershell
-.venv\Scripts\python.exe -m scripts.mcp_test
-```
 
 单场景评测：
 
 ```powershell
-.venv\Scripts\python.exe scripts\run_eval_case.py --scenario-id pdf_3papers_create_summary_doc --session-id dm:14292
+.venv\Scripts\python.exe scripts\run_eval_case.py --scenario-id <scenario_id> --session-id <session_id>
 ```
 
 层级检查：
@@ -237,27 +174,34 @@ MCP 连通性检查：
 .venv\Scripts\python.exe scripts\check_layers.py
 ```
 
-## 兼容包装
+MCP 连通性检查：
 
-当前仓库里还保留了两个旧目录：
+```powershell
+.venv\Scripts\python.exe -m scripts.mcp_test
+```
+
+## 兼容层
+
+以下目录目前保留为兼容包装：
 
 - `backend/mcp_client/`
 - `backend/mcp_server_local/`
 
-它们现在主要用于兼容旧 import 路径和旧 MCP 启动路径。新代码应优先落在：
+新代码优先落到：
 
 - `backend/runtime/`
 - `backend/tools/`
 
-## 运行产物
+## 本地环境目录
 
-以下内容属于运行产物，不应提交：
+`.venv/` 和 `node_modules/` 是本地依赖缓存，不属于逻辑结构的一部分，也不应该作为项目分层来理解。
+
+## 不应提交的内容
 
 - `data/`
-- `manifest/`
-- `persist/`
 - `he/runs/`
 - `he/reports/`
+- `knowledge_base/papers/uploads/`
 
 ## Git 工作流
 
