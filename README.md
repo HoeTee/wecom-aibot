@@ -8,54 +8,81 @@
 4. 创建或编辑企业微信文档
 5. 通过独立的 HE 层做回归、检查和报告
 
-## 分层关系
+## 架构
 
-- `entry receives`
-- `flow orchestrates`
-- `policy governs`
-- `state provides`
-- `caps define`
-- `runtime dispatches`
-- `tools execute`
-- `he evaluates`
+```text
+原则层
+  README.md
+  AGENTS.md
+  docs/*.md
+    └─ 定义规则、边界和 Source of Record
 
-这组关系不是口号，而是目录约束。
+运行时层
+  backend/
+    entry/    receives
+    flow/     orchestrates
+    policy/   governs
+    state/    provides
+    caps/     defines actions
+    runtime/  dispatches
+    tools/    executes
 
-## 逻辑结构
+验证层
+  he/
+    └─ evaluates
+```
+
+```text
+用户输入
+  ↓
+gateway/
+  ↓
+backend/entry
+  ↓
+backend/flow
+  ├─ 读取 policy 规则
+  ├─ 读取 state 事实
+  └─ 选择 caps 动作
+        ↓
+     backend/runtime
+        ↓
+     backend/tools
+        ↓
+     外部系统 / 本地执行
+
+he/
+  └─ 检查整个过程和结果
+```
 
 ```text
 wecom-aibot/
   README.md
   AGENTS.md
-
-  backend/                  # 生产代码
-    app.py                  # 稳定 Flask 入口 facade
-    agent.py                # 稳定 agent facade
-    memory.py               # 稳定 memory facade
-    entry/                  # entry
-    flow/                   # flow
-    policy/                 # policy
-    state/                  # state
-    caps/                   # caps
-    runtime/                # runtime（MCP + CLI dispatch）
-    tools/                  # tools（CLI implementations + local tool code）
-
-  gateway/
-    long_connection.ts      # 企业微信网关入口
-
-  docs/                     # 规则和架构文档
+  docs/                     # 原则层
+  backend/                  # 运行时层
+    app.py
+    agent.py
+    memory.py
+    entry/
+    flow/
+    policy/
+    state/
+    caps/
+    runtime/
+    tools/
   he/                       # 独立 HE 层
-  knowledge_base/           # 固定知识库材料
-  prompts/                  # prompt 文件
-  scripts/                  # 稳定脚本入口
-  config/                   # 本地配置模板
-  data/                     # 本地状态、索引、日志
+  gateway/
+  knowledge_base/
+  prompts/
+  scripts/
+  config/
+  data/
 ```
 
 知识库目录约定：
 
 - 所有知识库 PDF 直接放在 `knowledge_base/` 根目录
-- 固定材料和上传材料不再分 `papers/`、`uploads/` 子目录
+- 固定材料和上传材料不再分子目录
 - 上传文件只通过文件名前缀 `upload__` 区分
 
 ## data 目录
@@ -101,27 +128,11 @@ he/
 
 ## 当前能力
 
-当前已经落地的主能力包括：
+当前已经落地的主能力分三类：
 
-- PDF 上传后入知识库
-- 重复上传和同名更新提示
-- 知识库文件列表查询
-- 知识库全量文件 follow-up 列表
-- 上传文件范围列表
-- 相关文档候选查询
-- 上传文件改名确认与执行（固定材料默认不直接改名）
-- 原 PDF 导出前澄清与原文件返回
-- 删除知识库文件前确认
-- 本地 RAG 检索与总结
-- 企业微信文档创建与编辑
-- 把知识库内容并入当前文档
-- 用知识库内容替换当前文档相关部分
-- 把知识库内容扩写成当前文档的一节
-- `doc_id` / `doc_url` / `doc_name` 连续性维护
-- `flow_trace`
-- `run_eval_case`
-- `check_layers`
-- required stdio MCP boot preflight
+- 知识库：上传、去重、列表、相关候选、改名、导出、删除前确认
+- 文档：创建、读取、覆盖、追加、替换、扩写，以及 `doc_id/doc_url/doc_name` 连续性维护
+- HE：`flow_trace`、`run_eval_case`、`check_layers`、required stdio MCP boot preflight
 
 ## Source of Record
 
@@ -145,34 +156,72 @@ he/
 
 安装依赖：
 
+Windows:
+
 ```powershell
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 npm install
 ```
 
+macOS / Linux:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+npm install
+```
+
 准备配置：
+
+Windows:
 
 ```powershell
 Copy-Item .env.example .env
 Copy-Item config\mcp_servers.example.json config\mcp_servers.json
 ```
 
+macOS / Linux:
+
+```bash
+cp .env.example .env
+cp config/mcp_servers.example.json config/mcp_servers.json
+```
+
 启动 backend：
+
+Windows:
 
 ```powershell
 .venv\Scripts\python.exe -m backend.app
 ```
 
+macOS / Linux:
+
+```bash
+.venv/bin/python -m backend.app
+```
+
 启动 gateway：
 
-```powershell
+Windows / macOS / Linux:
+
+```bash
 npm run gateway
 ```
 
 健康检查：
 
+Windows:
+
 ```powershell
 Invoke-WebRequest http://127.0.0.1:5000/health
+```
+
+macOS / Linux:
+
+```bash
+curl http://127.0.0.1:5000/health
 ```
 
 ## 常用脚本
@@ -206,30 +255,20 @@ MCP 连通性检查：
 .venv\Scripts\python.exe scripts\cleanup_artifacts.py
 ```
 
-## 兼容层
-
-以下目录目前保留为兼容包装：
-
-- `backend/mcp_client/`
-- `backend/mcp_server_local/`
-
-新代码优先落到：
-
-- `backend/runtime/`
-- `backend/tools/`
-
-当前第一阶段已经开始把知识库能力收敛成 CLI 风格动作：
-
-- `backend/runtime/cli.py`
-- `backend/tools/kb_cli.py`
-- `backend/tools/doc_cli.py`
-- `backend/tools/rag_cli.py`
+## CLI 动作层
 
 当前动作层已经覆盖：
 
 - `kb.*`
 - `doc.*`
 - `rag.*`
+
+主要入口：
+
+- `backend/runtime/cli.py`
+- `backend/tools/kb_cli.py`
+- `backend/tools/doc_cli.py`
+- `backend/tools/rag_cli.py`
 
 当前 `agent` 侧新增了：
 
