@@ -23,11 +23,11 @@ except ImportError:  # pragma: no cover - module import path differs when run wi
 from backend.memory import init_db
 
 DB_PATH = PROJECT_ROOT / "data" / "memory.sqlite3"
-EVALS_DIR = PROJECT_ROOT / "evals"
-SCENARIOS_DIR = EVALS_DIR / "scenarios"
-RUNS_DIR = EVALS_DIR / "runs"
-REPORTS_DIR = EVALS_DIR / "reports"
-GLOBAL_GATES_PATH = EVALS_DIR / "gates" / "global.yaml"
+HE_DIR = PROJECT_ROOT / "he"
+SCENARIOS_DIR = HE_DIR / "scenarios"
+RUNS_DIR = HE_DIR / "runs"
+REPORTS_DIR = HE_DIR / "reports"
+GLOBAL_GATES_PATH = HE_DIR / "gates" / "global.yaml"
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -406,15 +406,15 @@ def evaluate_scenario_gate(
 
 
 def suggested_fix_layers(failed_gate_ids: list[str], layer_check_passed: bool) -> dict[str, Any]:
-    primary = {"layer": "orchestration", "directory": "backend/app.py"}
-    secondary = {"layer": "policy_state", "directory": "backend/memory.py"}
+    primary = {"layer": "flow", "directory": "backend/flow/chat.py"}
+    secondary = {"layer": "state", "directory": "backend/state/store.py"}
 
     if not layer_check_passed:
-        primary = {"layer": "tool_runtime", "directory": "backend/mcp_client/"}
-        secondary = {"layer": "tool_implementation", "directory": "backend/mcp_server_local/"}
+        primary = {"layer": "runtime", "directory": "backend/runtime/"}
+        secondary = {"layer": "tools", "directory": "backend/tools/"}
     elif any(gate_id in failed_gate_ids for gate_id in ("must_bind_doc_triple", "must_reuse_existing_doc_on_followup")):
-        primary = {"layer": "policy_state", "directory": "backend/memory.py"}
-        secondary = {"layer": "tool_runtime", "directory": "backend/mcp_client/"}
+        primary = {"layer": "state", "directory": "backend/state/store.py"}
+        secondary = {"layer": "runtime", "directory": "backend/runtime/"}
     elif any(
         gate_id in failed_gate_ids
         for gate_id in (
@@ -424,8 +424,8 @@ def suggested_fix_layers(failed_gate_ids: list[str], layer_check_passed: bool) -
             "must_follow_requested_structure",
         )
     ):
-        primary = {"layer": "orchestration", "directory": "backend/agent.py"}
-        secondary = {"layer": "tool_runtime", "directory": "backend/mcp_client/"}
+        primary = {"layer": "flow", "directory": "backend/flow/agent_core.py"}
+        secondary = {"layer": "runtime", "directory": "backend/runtime/"}
 
     return {"primary": primary, "secondary": secondary}
 

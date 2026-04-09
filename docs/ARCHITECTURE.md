@@ -2,25 +2,55 @@
 
 ## 目的
 
-这份文档定义这个仓库的分层。
+这份文档定义仓库的运行时层级，以及独立的 HE 层。
 
-目标不是一次把目录完全重构完，而是先把层级边界说清楚，避免不同职责混在一起，影响后续 HE。
-
-## 总体原则
-
-先分层，再在层内模块化。
-
-分层的目的：
+目标不是为了追求形式上的“好看”，而是为了：
 
 - 让职责边界清楚
-- 让 hook 和 evaluator 能插在层与层之间
-- 让迭代时能知道问题发生在哪一层
+- 让 hook 和 evaluator 有稳定落点
+- 让层级检查有真实目录可查
+- 让后续重构和回归有明确参照
 
-新增能力时，先定层，再定文件，再写代码。
+## 两套结构
 
-## 六层结构
+这个仓库同时存在两套结构：
 
-### 第 1 层：Entry / Transport
+1. 运行时层级
+2. 独立的 HE 层
+
+两者不是同一套东西。
+
+### 运行时层级
+
+运行时按这七层理解：
+
+- `entry`
+- `flow`
+- `policy`
+- `state`
+- `caps`
+- `runtime`
+- `tools`
+
+### 独立 HE 层
+
+`he` 不属于运行时七层。  
+它是外部验证和回归层。
+
+## 一句话关系
+
+- `entry receives`
+- `flow orchestrates`
+- `policy governs`
+- `state provides`
+- `caps define`
+- `runtime dispatches`
+- `tools execute`
+- `he evaluates`
+
+## 各层职责
+
+### 1. `entry`
 
 职责：
 
@@ -28,84 +58,108 @@
 - 传递输入
 - 返回输出
 
-例如：
+当前对应：
 
-- 接收企微消息
-- 区分 text / file
-- 调 backend 接口
-- 把回复发回企微
+- `backend/app.py`
+- `backend/entry/*`
+- `gateway/long_connection.ts`
 
 这一层不负责真正业务判断。
 
-### 第 2 层：Orchestration
+### 2. `flow`
 
 职责：
 
-- 指挥谁去做事
 - 决定下一步走哪条流程
-- 决定是否先澄清、先 short-circuit、先读 state、还是先调 tool
+- 决定是否 short-circuit
+- 决定是否先澄清
+- 决定调用哪些能力
 
-这一层不亲自执行底层能力。
+当前对应：
 
-### 第 3 层：Policy / State
+- `backend/agent.py`
+- `backend/flow/*`
+
+这一层负责编排，不负责真正干活。
+
+### 3. `policy`
 
 职责：
 
-- 维护业务规则
-- 维护当前会话事实
+- 定义业务规则
 
-规则例如：
+例如：
 
 - 什么叫“重新生成”
 - 什么情况下必须确认
 - 什么情况下不能复用旧文档
+- 什么情况下要先澄清
 
-状态例如：
+当前对应：
+
+- `backend/policy/*`
+
+### 4. `state`
+
+职责：
+
+- 提供当前会话事实
+- 维护持久状态
+
+例如：
 
 - 当前绑定的 `doc_id` / `doc_url` / `doc_name`
 - 最近上传文件状态
-- 当前会话最近用户请求
+- request / flow event 的持久记录
 
-这一层可以理解为：
+当前对应：
 
-规则 + 当前会话事实
+- `backend/memory.py`
+- `backend/state/*`
 
-### 第 4 层：Capability
-
-职责：
-
-- 定义对上层稳定可用的业务能力
-
-例如：
-
-- 列知识库文件
-- 上传 PDF 到知识库
-- 查询知识库
-- 创建文档
-- 编辑文档
-
-约束：
-
-- 对 agent 可用的业务能力，最终统一通过 MCP tools 暴露
-- agent 不直接调用底层本地函数能力
-
-### 第 5 层：Adapter / Tool Runtime
+### 5. `caps`
 
 职责：
 
-- 作为 capability 和 agent/orchestration 之间的中介层
-- 负责 MCP tools 的连接、暴露、路由、参数传递
+- 定义对上层稳定可用的业务能力边界
 
 例如：
 
-- 发现有哪些 MCP tools 可用
-- 给 tool 加统一命名
-- 把调用路由到正确的 MCP 服务
-- 把参数和结果传回来
+- 知识库入库
+- 知识库枚举
+- RAG 查询
+- 文档创建
+- 文档编辑
 
-这一层不负责决定用户意图，只负责把 tool 接通并转发。
+当前对应：
 
-### 第 6 层：Tool Implementation
+- `backend/caps/*`
+
+注意：
+
+- `caps` 定义能力
+- 但对 agent 可见的统一接口仍然通过 MCP 暴露
+
+### 6. `runtime`
+
+职责：
+
+- 连接 MCP
+- 暴露 MCP tools
+- 路由和转发调用
+- 统一参数和结果传递
+
+当前对应：
+
+- `backend/runtime/*`
+
+兼容包装仍保留在：
+
+- `backend/mcp_client/*`
+
+这些旧路径现在主要用于兼容历史 import，不是新的主编辑位置。
+
+### 7. `tools`
 
 职责：
 
@@ -114,130 +168,119 @@
 例如：
 
 - 本地 `llamaindex_rag`
-- 企微文档 MCP 服务
-- 未来的知识库文件管理 MCP 服务
+- 企微文档相关 tool 实现
+- 未来的知识库文件管理 tool 实现
 
-这一层负责真正干活，但不负责：
+当前对应：
 
-- 判断用户意图
-- 决定走哪条流程
-- 决定是否澄清
+- `backend/tools/*`
 
-## 当前文件与层级的对应关系
+兼容包装仍保留在：
 
-### 第 1 层：Entry / Transport
+- `backend/mcp_server_local/*`
 
-- `gateway/long_connection.ts`
-- `backend/app.py` 中的 HTTP entry
+这些旧路径现在主要用于兼容旧 MCP 启动路径。
 
-### 第 2 层：Orchestration
+### 8. `he`
 
-- `backend/app.py`
-- `backend/agent.py`
+职责：
 
-### 第 3 层：Policy / State
+- 定义场景
+- 定义 gates
+- 收集运行证据
+- 输出报告
+- 做层级检查和回归判断
 
-- `backend/memory.py`
-- 后续建议拆出的 `backend/policies/*`
+当前对应：
 
-### 第 4 层：Capability
+- `he/gates/*`
+- `he/scenarios/*`
+- `he/runs/*`
+- `he/reports/*`
+- `scripts/run_eval_case.py`
+- `scripts/check_layers.py`
 
-当前还没有完全显式抽出。
+## 仓库目录映射
 
-后续建议逐步形成：
+```text
+backend/
+  entry/
+  flow/
+  policy/
+  state/
+  caps/
+  runtime/
+  tools/
 
-- `backend/capabilities/knowledge_base.py`
-- `backend/capabilities/rag.py`
-- `backend/capabilities/documents.py`
-
-### 第 5 层：Adapter / Tool Runtime
-
-- `backend/mcp_client/host.py`
-- `backend/mcp_client/connection.py`
-
-### 第 6 层：Tool Implementation
-
-- `backend/mcp_server_local/llamaindex_rag/*`
-- 其他 MCP 服务端实现
-
-## 分层与 HE 的关系
-
-HE 不只是看最终结果，也要看层间组合。
-
-例如：
-
-- Entry -> Orchestration
-  - 是否分流正确
-- Orchestration -> Policy / State
-  - 是否读对了当前会话状态
-- Orchestration -> Capability / Tool Runtime
-  - 是否选对了能力和 tool
-- Tool Runtime -> Tool Implementation
-  - 是否把调用正确转发
-
-所以，分层不是为了形式，而是为了：
-
-- 更清楚地插 hook
-- 更清楚地写 evaluator
-- 更清楚地定位回归
+he/
+  gates/
+  scenarios/
+  runs/
+  reports/
+```
 
 ## 层级约束
 
-### 1. Orchestration 不能直接依赖 Tool Implementation
+### 1. `flow` 不能直接依赖 `tools`
 
-Orchestration 层不能直接 import Tool Implementation 层。
+`flow` 必须通过：
 
-它必须通过：
+- `caps`
+- `runtime`
 
-- MCP
-- tool runtime
-- 统一的能力边界
+去使用底层能力，不能直接 import `tools`。
 
-来调用底层能力。
+### 2. `tools` 不能反向依赖 `flow`
 
-### 2. Tool Implementation 不能反向依赖 Orchestration
+下层不能反向依赖上层。  
+尤其 `tools` 不能 import `backend/agent.py` 或 `backend/flow/*` 来决定流程。
 
-下层不能反向依赖上层。
+### 3. 生产代码不能依赖 `he`
 
-尤其：
+生产代码不能 import：
 
-- `llamaindex_rag`
-- 具体 MCP tool 实现
+- `he/*`
 
-不能 import `backend/app.py` 或 `backend/agent.py` 去决定用户流程。
+`he` 是外部验证层，不是生产运行依赖。
 
-### 3. HE / eval 层不能被生产代码依赖
+### 4. `policy` 和 `state` 不决定完整流程
 
-HE 是外部迭代工具层，不是生产链路的一部分，应保持可拆卸。
-
-也就是：
-
-- `backend/*` 不应 import `evals/*`
-- 生产流程不应依赖 `review.json`
-- 生产流程不应依赖 `gate_results.json`
-
-### 4. Policy / State 不决定完整流程
-
-Policy / State 层可以提供：
+它们可以提供：
 
 - 规则
-- 当前会话事实
+- 会话事实
 
-但不能自己决定完整业务流程。
+但完整流程仍由 `flow` 决定。
 
-完整流程应由 Orchestration 层决定。
+### 5. hook 属于可观测性输出，不替代流程决策
 
-### 5. hook 的位置
+hook 负责：
 
-hook 属于生产代码里的可观测性输出，不是独立业务层。
+- 记录 route
+- 记录 state
+- 记录 tool 调用
+- 记录输出
 
-它的职责是：
+hook 不负责：
 
-- 导出事件
-- 记录 route / state / tool / output
+- 取代 `flow`
+- 取代 `policy`
+- 取代 evaluator
 
-它不负责：
+## HE 为什么需要分层
 
-- 决定业务流程
-- 替代 orchestration
-- 替代 evaluator
+HE 不是只看最终回复。  
+HE 还要看层与层之间有没有断链。
+
+例如：
+
+- `entry -> flow`
+  - 有没有分流正确
+- `flow -> policy/state`
+  - 有没有读对规则和会话事实
+- `flow -> runtime`
+  - 有没有选对能力和 tool
+- `runtime -> tools`
+  - 有没有正确转发到实现层
+
+所以分层不是为了抽象本身，而是为了让错误能被定位和验证。

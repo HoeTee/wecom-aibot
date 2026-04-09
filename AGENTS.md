@@ -6,24 +6,51 @@
 2. 检索或总结来源材料
 3. 创建或编辑企业微信文档
 4. 通过 `doc_id`、`doc_url`、`doc_name` 维持文档连续性
+5. 通过独立的 `he/` 层验证流程、回归和层级约束
+
+`AGENTS.md` 只做索引，不做长篇手册。
 
 ## Source Of Record
 
 以下文件是这个仓库的知识基线：
 
-- [docs/PRODUCT.md](/C:/Users/18014/wecom-aibot/docs/PRODUCT.md)
-- [docs/DOC_WRITING.md](/C:/Users/18014/wecom-aibot/docs/DOC_WRITING.md)
-- [docs/REPLY_STYLE.md](/C:/Users/18014/wecom-aibot/docs/REPLY_STYLE.md)
-- [docs/MCP_TOOLS.md](/C:/Users/18014/wecom-aibot/docs/MCP_TOOLS.md)
-- [docs/MEMORY.md](/C:/Users/18014/wecom-aibot/docs/MEMORY.md)
-- [docs/ARCHITECTURE.md](/C:/Users/18014/wecom-aibot/docs/ARCHITECTURE.md)
-- [docs/ROUTING_RULES.md](/C:/Users/18014/wecom-aibot/docs/ROUTING_RULES.md)
-- [docs/FLOWS.md](/C:/Users/18014/wecom-aibot/docs/FLOWS.md)
-- [docs/CHECKS.md](/C:/Users/18014/wecom-aibot/docs/CHECKS.md)
-- [docs/EVALS.md](/C:/Users/18014/wecom-aibot/docs/EVALS.md)
-- [evals/gates/global.yaml](/C:/Users/18014/wecom-aibot/evals/gates/global.yaml)
+- [docs/PRODUCT.md](C:/Users/18014/wecom-aibot/docs/PRODUCT.md)
+- [docs/DOC_WRITING.md](C:/Users/18014/wecom-aibot/docs/DOC_WRITING.md)
+- [docs/REPLY_STYLE.md](C:/Users/18014/wecom-aibot/docs/REPLY_STYLE.md)
+- [docs/MCP_TOOLS.md](C:/Users/18014/wecom-aibot/docs/MCP_TOOLS.md)
+- [docs/MEMORY.md](C:/Users/18014/wecom-aibot/docs/MEMORY.md)
+- [docs/ARCHITECTURE.md](C:/Users/18014/wecom-aibot/docs/ARCHITECTURE.md)
+- [docs/ROUTING_RULES.md](C:/Users/18014/wecom-aibot/docs/ROUTING_RULES.md)
+- [docs/FLOWS.md](C:/Users/18014/wecom-aibot/docs/FLOWS.md)
+- [docs/CHECKS.md](C:/Users/18014/wecom-aibot/docs/CHECKS.md)
+- [docs/EVALS.md](C:/Users/18014/wecom-aibot/docs/EVALS.md)
+- [he/gates/global.yaml](C:/Users/18014/wecom-aibot/he/gates/global.yaml)
 
-`AGENTS.md` 只做索引，不做长篇手册。
+## 目录约定
+
+运行时层级：
+
+- `backend/entry`
+- `backend/flow`
+- `backend/policy`
+- `backend/state`
+- `backend/caps`
+- `backend/runtime`
+- `backend/tools`
+
+独立 HE 层：
+
+- `he/`
+
+稳定入口文件名不改：
+
+- `backend/app.py`
+- `backend/agent.py`
+- `backend/memory.py`
+- `scripts/run_eval_case.py`
+- `scripts/check_layers.py`
+- `scripts/mcp_test.py`
+- `gateway/long_connection.ts`
 
 ## 可修改文件
 
@@ -33,34 +60,45 @@
 - `backend/app.py`
 - `backend/agent.py`
 - `backend/memory.py`
-- `backend/mcp_client/host.py`
-- `backend/mcp_client/connection.py`
+- `backend/entry/*`
+- `backend/flow/*`
+- `backend/policy/*`
+- `backend/state/*`
+- `backend/caps/*`
+- `backend/runtime/*`
+- `backend/tools/*`
 - `docs/*.md`
-- `evals/gates/*`
-- `evals/scenarios/*`
+- `he/gates/*`
+- `he/scenarios/*`
+- `he/review_template.md`
 
 ## 非必要不要修改的文件
 
 - `knowledge_base/papers/*`
 - `config/mcp_servers.json`
 - `gateway/long_connection.ts`
-- `data/`、`evals/runs/`、`evals/reports/` 下的运行产物
+- `data/`
+- `manifest/`
+- `persist/`
+- `he/runs/`
+- `he/reports/`
 
 ## 迭代规则
 
-一次只改一个层面：
+一次只改一个主要层面：
 
 - prompt
-- tool 暴露方式或 tool 使用约束
-- memory 读写或注入逻辑
-- orchestration flow
+- flow
+- policy / state
+- runtime / tools
+- HE checks
 
-改完后，必须重跑同一批固定 eval 场景。
+改完后，必须重跑同一批固定场景，再比较结果。
 
 当前 workflow：
 
 1. coding agent 做一轮收敛修改
-2. 跑固定 scenarios
-3. 先看 shared hard gates 是否通过
-4. 再由 human reviewer 给出最终结论
-5. 只有在结论明确后，才进入下一轮修改
+2. 跑固定 `scenarios`
+3. 先看 hard gates、`flow_trace`、`layer_checks`
+4. 自动检查收敛后，再做最终 human review
+5. 只有结论明确后，才进入下一轮修改

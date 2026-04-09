@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend.mcp_client import MCPHost, load_mcp_server_configs_from_env
+from backend.runtime import MCPHost, load_mcp_server_configs_from_env
 
 async def test_mcp_client():
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")

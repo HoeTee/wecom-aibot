@@ -10,19 +10,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 LAYER_DEFINITIONS = [
-    ("orchestration", ("backend.app", "backend.agent")),
-    ("policy_state", ("backend.memory",)),
-    ("tool_runtime", ("backend.mcp_client",)),
-    ("tool_implementation", ("backend.mcp_server_local",)),
-    ("eval", ("evals",)),
+    ("entry", ("backend.app", "backend.entry")),
+    ("flow", ("backend.agent", "backend.flow")),
+    ("policy", ("backend.policy",)),
+    ("state", ("backend.memory", "backend.state")),
+    ("caps", ("backend.caps",)),
+    ("runtime", ("backend.runtime", "backend.mcp_client")),
+    ("tools", ("backend.tools", "backend.mcp_server_local")),
+    ("he", ("he",)),
 ]
 
 LAYER_ORDER = {
-    "orchestration": 1,
-    "policy_state": 2,
-    "tool_runtime": 3,
-    "tool_implementation": 4,
-    "eval": 5,
+    "entry": 1,
+    "flow": 2,
+    "policy": 3,
+    "state": 4,
+    "caps": 5,
+    "runtime": 6,
+    "tools": 7,
+    "he": 8,
 }
 
 
@@ -39,12 +45,8 @@ def _layer_for_module(module_name: str) -> str | None:
 
 
 def _iter_python_files() -> list[Path]:
-    return sorted(
-        path
-        for root in (PROJECT_ROOT / "backend", PROJECT_ROOT / "evals")
-        if root.exists()
-        for path in root.rglob("*.py")
-    )
+    roots = [PROJECT_ROOT / "backend", PROJECT_ROOT / "he"]
+    return sorted(path for root in roots if root.exists() for path in root.rglob("*.py"))
 
 
 def _extract_imports(path: Path) -> list[str]:
@@ -74,23 +76,23 @@ def _extract_imports(path: Path) -> list[str]:
 def _suggested_refactor_for_rule(rule_id: str) -> dict[str, Any]:
     mapping = {
         "lower_layer_imports_higher_layer": {
-            "primary": {"layer": "policy_state", "directory": "backend/policies/"},
-            "secondary": {"layer": "capability_api", "directory": "backend/capabilities/"},
+            "primary": {"layer": "policy", "directory": "backend/policy/"},
+            "secondary": {"layer": "caps", "directory": "backend/caps/"},
         },
-        "production_imports_eval": {
-            "primary": {"layer": "eval", "directory": "evals/"},
-            "secondary": {"layer": "architecture_docs", "directory": "docs/"},
+        "production_imports_he": {
+            "primary": {"layer": "he", "directory": "he/"},
+            "secondary": {"layer": "docs", "directory": "docs/"},
         },
-        "orchestration_imports_tool_implementation": {
-            "primary": {"layer": "tool_runtime", "directory": "backend/mcp_client/"},
-            "secondary": {"layer": "capability_api", "directory": "backend/capabilities/"},
+        "flow_imports_tools_directly": {
+            "primary": {"layer": "runtime", "directory": "backend/runtime/"},
+            "secondary": {"layer": "caps", "directory": "backend/caps/"},
         },
     }
     return mapping.get(
         rule_id,
         {
-            "primary": {"layer": "policy_state", "directory": "backend/policies/"},
-            "secondary": {"layer": "capability_api", "directory": "backend/capabilities/"},
+            "primary": {"layer": "policy", "directory": "backend/policy/"},
+            "secondary": {"layer": "caps", "directory": "backend/caps/"},
         },
     )
 
@@ -113,12 +115,12 @@ def run_layer_checks(project_root: Path | None = None) -> dict[str, Any]:
             rule_id: str | None = None
             violated_rule: str | None = None
 
-            if source_layer != "eval" and target_layer == "eval":
-                rule_id = "production_imports_eval"
-                violated_rule = "生产代码不能依赖 eval 层。"
-            elif source_layer == "orchestration" and target_layer == "tool_implementation":
-                rule_id = "orchestration_imports_tool_implementation"
-                violated_rule = "Orchestration 层不能直接依赖 Tool Implementation 层。"
+            if source_layer != "he" and target_layer == "he":
+                rule_id = "production_imports_he"
+                violated_rule = "生产代码不能依赖 HE 层。"
+            elif source_layer == "flow" and target_layer == "tools":
+                rule_id = "flow_imports_tools_directly"
+                violated_rule = "flow 层不能直接依赖 tools 层。"
             elif LAYER_ORDER[source_layer] > LAYER_ORDER[target_layer]:
                 rule_id = "lower_layer_imports_higher_layer"
                 violated_rule = "下层不能反向依赖上层。"
@@ -138,10 +140,7 @@ def run_layer_checks(project_root: Path | None = None) -> dict[str, Any]:
                 }
             )
 
-    return {
-        "passed": not violations,
-        "violations": violations,
-    }
+    return {"passed": not violations, "violations": violations}
 
 
 def main() -> None:

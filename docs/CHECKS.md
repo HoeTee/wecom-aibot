@@ -14,12 +14,12 @@
 - human review 不参与每一轮迭代
 - human review 只在一轮代码和规则收敛后，检查最终产品效果
 
-## 自动检查的分层
+## 自动检查的三层
 
 当前检查体系分三层：
 
 1. `hook`
-   - 自动记录 route / state / tool / output
+   - 自动记录 route、state、tool、output
 2. `guard`
    - 在运行时尽量阻止明显错误
 3. `evaluator`
@@ -31,7 +31,7 @@
 
 当前要求：
 
-- 每次关键请求都应导出独立的 `flow_trace.json`
+- 每次关键请求都导出独立的 `flow_trace.json`
 - 单次运行先落 JSON
 - 后续由 maintenance 汇总和清理，不做永久无限堆积
 
@@ -56,13 +56,13 @@
 
 事件必须保留真实发生顺序。
 
-每条 event 默认必须包含：
+每条事件默认至少包含：
 
 - `timestamp`
 - `layer_at_event`
 - `event`
 
-此外，当前默认必须覆盖这些关键字段：
+此外，默认必须覆盖这些关键字段：
 
 - `route_selected`
 - `route_reason`
@@ -76,8 +76,7 @@
 
 #### `route_selected`
 
-必须明确写出这次请求最终走了哪条路。
-
+必须明确写出这次请求最终走了哪条路。  
 命名采用两层：
 
 - `code`
@@ -85,14 +84,12 @@
 
 #### `route_reason`
 
-必须记录为什么选了这条路。
-
+必须记录为什么选了这条路。  
 默认是原因列表，而不是单条字符串。
 
 #### `selected_target`
 
-默认记录对象摘要，而不是只记单个主标识。
-
+默认记录对象摘要，而不是只记单个主标识。  
 建议至少包含：
 
 - `target_type`
@@ -103,8 +100,7 @@
 
 #### `guard_hit`
 
-默认记录命中的 guard 列表。
-
+默认记录命中的 guard 列表。  
 命名采用两层：
 
 - `code`
@@ -121,18 +117,17 @@
 - 结果摘要
 - `result_status`
 
-其中 `result_status` 至少区分：
+`result_status` 至少区分：
 
 - `success`
 - `failure`
 - `partial`
 
-这里用摘要，不记录全量原文。
+这里只记录摘要，不记录全量原文。
 
 #### `clarify_needed`
 
-必须明确标记这次是否进入澄清分支。
-
+必须明确标记这次是否进入澄清分支。  
 默认包含：
 
 - 是否需要澄清
@@ -140,14 +135,13 @@
 
 #### `stop_reason`
 
-必须写明这次流程为什么在这里结束。
-
+必须写明这次流程为什么在这里结束。  
 默认包含：
 
 - 两层命名：`code` / `detail`
 - 最后停在哪一层
 
-## 自动检查优先
+## 自动检查优先项
 
 以下项默认属于自动检查：
 
@@ -158,8 +152,6 @@
 - 上传 PDF 后却走到了普通聊天理解
 - 问知识库列表却走到了 RAG 总结
 - 文档链接意图不明却直接进入编辑
-
-这类边界清晰，默认自动检查。
 
 ### 2. 是否重复索要已上传文件
 
@@ -204,11 +196,7 @@
 - 用户未要求 comparison table
 - 系统却提前生成第 5 节表格
 
-这类项默认自动检查。
-
 ### 6. 是否多调 / 漏调 / 错调 tool
-
-这类项默认自动检查。
 
 判断依据不是让 evaluator 每次重新自由猜用户意图，而是：
 
@@ -231,14 +219,8 @@ evaluator 默认自动执行。
 
 其中：
 
+- `failed_checks` 用 `code + detail`
 - `suggested_fix_layer` 默认包含主层和次层
-
-### `failed_checks`
-
-命名采用两层：
-
-- `code`：抽象类
-- `detail`：业务化细项
 
 ### 场景结果与总结果
 
@@ -249,8 +231,8 @@ evaluator 默认既输出：
 
 推荐位置：
 
-- `evals/reports/<run_id>.md`
-- `evals/reports/<run_id>.json`
+- `he/reports/<run_id>.md`
+- `he/reports/<run_id>.json`
 
 ## layer checks
 
@@ -261,8 +243,8 @@ layer checks 也属于自动检查。
 以下三类都重要，但当前第一优先级是：
 
 1. 下层反向 import 上层
-2. production 代码 import `evals/*`
-3. orchestration 直接依赖 tool implementation
+2. production 代码 import `he/*`
+3. `flow` 直接依赖 `tools`
 
 ### 第一阶段策略
 
@@ -271,7 +253,7 @@ layer checks 也属于自动检查。
 
 推荐位置：
 
-- `evals/runs/<run_id>/layer_checks.json`
+- `he/runs/<run_id>/layer_checks.json`
 
 ### 报告内容
 
@@ -311,14 +293,12 @@ layer checks 也属于自动检查。
 
 ### 2. 回复是否自然
 
-默认自动检查为主。
-
+默认自动检查为主。  
 用户反馈和最终 human review 用于持续校正标准。
 
 ### 3. 总结是否有洞见
 
-默认自动检查为主。
-
+默认自动检查为主。  
 最终由 human reviewer 判断：
 
 - 是否真的有价值
@@ -331,7 +311,7 @@ human review 不是每轮 HE 的常规步骤。
 当前默认流程是：
 
 1. coding agent 自动修改
-2. 自动跑固定 scenarios
+2. 自动跑固定 `scenarios`
 3. 自动跑 guards / evaluator
 4. 代码和规则收敛后
 5. 再由 human reviewer 看最终文档和最终体验
