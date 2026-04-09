@@ -390,6 +390,10 @@ def collect_flow_results(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
     )
 
     if "assistant_requested_tools" in event_names:
+        intent_packet_index = next(
+            (index for index, item in enumerate(events) if item["event"] == "intent_packet_created"),
+            None,
+        )
         plan_index = next(
             (index for index, item in enumerate(events) if item["event"] == "agent_plan_created"),
             None,
@@ -403,6 +407,15 @@ def collect_flow_results(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
             None,
         )
         plan_present = plan_index is not None
+        checks.append(
+            {
+                "id": "flow_intent_packet_present",
+                "passed": intent_packet_index is not None,
+                "reason": "tool 调用前存在 intent_packet_created。"
+                if intent_packet_index is not None
+                else "assistant 已请求 tool，但 flow trace 缺少 intent_packet_created。",
+            }
+        )
         checks.append(
             {
                 "id": "flow_agent_plan_present",
@@ -453,6 +466,33 @@ def collect_flow_results(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
                 else "agent_self_check 没有出现在首个 tool_called 之前。",
             }
         )
+        intent_packet_ordered = (
+            intent_packet_index is not None
+            and tool_called_index is not None
+            and intent_packet_index < tool_called_index
+        )
+        checks.append(
+            {
+                "id": "flow_intent_packet_before_tool_call",
+                "passed": intent_packet_ordered,
+                "reason": "intent_packet_created 出现在首个 tool_called 之前。"
+                if intent_packet_ordered
+                else "intent_packet_created 没有出现在首个 tool_called 之前。",
+            }
+        )
+        reply_index = next(
+            (index for index, item in enumerate(events) if item["event"] == "reply_generated"),
+            None,
+        )
+        checks.append(
+            {
+                "id": "flow_tool_execution_has_reply",
+                "passed": reply_index is not None,
+                "reason": "tool 执行后存在 reply_generated。"
+                if reply_index is not None
+                else "assistant 已请求 tool，但 flow trace 缺少 reply_generated。",
+            }
+        )
 
     return {"passed": all(item["passed"] for item in checks), "checks": checks}
 
@@ -483,6 +523,33 @@ def latest_route_selected(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
         payload = parse_args_json(row["payload_json"])
         return dict(payload.get("route_selected") or {})
     return {}
+
+
+def latest_intent_packet(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    for row in reversed(flow_rows):
+        if row["event_name"] != "intent_packet_created":
+            continue
+        return parse_args_json(row["payload_json"])
+    return {}
+
+
+def latest_stop_reason(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    for row in reversed(flow_rows):
+        if row["event_name"] != "stop_reason":
+            continue
+        return parse_args_json(row["payload_json"])
+    return {}
+
+
+def requested_tool_names(flow_rows: list[sqlite3.Row]) -> list[str]:
+    for row in reversed(flow_rows):
+        if row["event_name"] != "assistant_requested_tools":
+            continue
+        payload = parse_args_json(row["payload_json"])
+        tool_names = payload.get("tool_names")
+        if isinstance(tool_names, list):
+            return [str(name).strip() for name in tool_names if str(name).strip()]
+    return []
 
 
 def collect_contract_results() -> dict[str, Any]:
@@ -567,8 +634,12 @@ def evaluate_global_gate(
     tool_calls: list[sqlite3.Row],
     doc_binding: sqlite3.Row | None,
     user_request: str,
+    flow_rows: list[sqlite3.Row],
 ) -> tuple[bool, str]:
     tool_names = [row["tool_name"] for row in tool_calls]
+    intent_packet = latest_intent_packet(flow_rows)
+    stop_reason = latest_stop_reason(flow_rows)
+    requested_tools = requested_tool_names(flow_rows)
 
     if gate_id == "must_bind_doc_triple":
         if doc_binding and doc_binding["doc_id"] and doc_binding["doc_url"] and doc_binding["doc_name"]:
@@ -599,6 +670,35 @@ def evaluate_global_gate(
         if missing:
             return False, f"缺少结构部分：{missing}"
         return True, "写入内容包含要求结构。"
+
+    if gate_id == "file_management_intent_must_not_call_rag":
+        intent_family = str(intent_packet.get("intent_family") or "").strip()
+        intent = str(intent_packet.get("intent") or "").strip()
+        if intent_family == "knowledge_base" and intent in {"kb.rename", "kb.delete", "kb.export"}:
+            rag_tools = [
+                name
+                for name in {*(tool_names or []), *(requested_tools or [])}
+                if str(name).endswith("llamaindex_rag_query")
+            ]
+            if rag_tools:
+                return False, f"文件管理意图错误调用了 RAG：{rag_tools}"
+            return True, "文件管理意图没有掉入 RAG。"
+        return True, "当前请求不属于必须禁止 RAG 的文件管理意图。"
+
+    if gate_id == "agent_intent_packet_must_exist_before_tool_selection":
+        if (tool_calls or requested_tools) and not intent_packet:
+            return False, "存在 tool 调用，但缺少 agent intent packet。"
+        return True, "tool 调用前已存在 agent intent packet，或当前无 tool 调用。"
+
+    if gate_id == "tool_execution_must_end_with_reply_or_explicit_error":
+        if not tool_calls and not requested_tools:
+            return True, "当前无 tool 调用。"
+        if assistant_reply.strip():
+            return True, "tool 调用后产生了 assistant reply。"
+        stop_code = str(stop_reason.get("code") or "").strip()
+        if stop_code in {"agent_timeout", "guard_stop", "clarify_waiting_user"}:
+            return True, f"tool 调用后以显式 stop_reason 结束：{stop_code}"
+        return False, "tool 调用后既没有 assistant reply，也没有显式 stop_reason。"
 
     return True, f"未实现的 global gate，默认跳过：{gate_id}"
 
@@ -755,6 +855,19 @@ def evaluate_scenario_gate(
         if any(token in assistant_reply for token in ("确认改名", "改名为")):
             return True, "明确改名请求后，系统先进入确认。"
         return False, "明确改名请求后，系统没有准备确认步骤。"
+
+    if gate_id == "kb_ordinal_rename_must_prepare_confirmation":
+        if "第" not in user_request or "名字" not in user_request:
+            return True, "当前请求不属于序号引用改名。"
+        if route_selected.get("code") != "knowledge_base":
+            return False, "序号引用改名没有进入 knowledge_base 路由。"
+        if route_selected.get("detail") != "rename_confirm":
+            return False, "序号引用改名没有进入 rename_confirm 路由。"
+        if any(name.endswith("llamaindex_rag_query") for name in tool_names):
+            return False, "序号引用改名错误调用了 RAG。"
+        if any(token in assistant_reply for token in ("确认改名", "改名为", "harness engineering")):
+            return True, "序号引用改名已准备确认。"
+        return False, "序号引用改名没有给出明确确认。"
 
     if gate_id == "doc_merge_must_confirm_target_source_action":
         required_tokens = ("目标文档", "来源文档", "动作")
@@ -969,7 +1082,14 @@ def main() -> None:
             }
         )
     for gate_id in scenario.get("global_gates", []):
-        passed, reason = evaluate_global_gate(gate_id, assistant_reply, tool_calls, doc_binding, user_request)
+        passed, reason = evaluate_global_gate(
+            gate_id,
+            assistant_reply,
+            tool_calls,
+            doc_binding,
+            user_request,
+            flow_rows,
+        )
         gate_results.append(
             {
                 "id": gate_id,

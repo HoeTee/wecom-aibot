@@ -123,19 +123,28 @@ HE 已独立到 `he/`：
 
 - 用户明确给出原文件名和新名称后，系统是否先进入确认步骤
 
-### 14. `doc_merge_kb_into_current`
+### 14. `kb_rename_by_ordinal_reference`
+
+抓：
+
+- 用户按最近候选列表中的“第 N 份文件”发起改名时，系统是否正确解析序号引用
+- 是否进入知识库改名确认
+- 是否避免掉入 `rag.*`
+- 是否避免无回复结束
+
+### 15. `doc_merge_kb_into_current`
 
 抓：
 
 - 并入当前文档前，是否确认目标文档、来源文档和动作
 
-### 15. `doc_replace_kb_section`
+### 16. `doc_replace_kb_section`
 
 抓：
 
 - 替换前，是否先展示将被替换的章节预览
 
-### 16. `doc_expand_kb_section`
+### 17. `doc_expand_kb_section`
 
 抓：
 
@@ -154,6 +163,7 @@ python scripts/run_eval_case.py --scenario-id kb_list_all_files_followup --sessi
 python scripts/run_eval_case.py --scenario-id kb_uploaded_files_scope --session-id dm:14292
 python scripts/run_eval_case.py --scenario-id kb_rename_request_scope --session-id dm:14292
 python scripts/run_eval_case.py --scenario-id kb_rename_confirmation --session-id dm:14292
+python scripts/run_eval_case.py --scenario-id kb_rename_by_ordinal_reference --session-id dm:14292
 ```
 
 其中：

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-from backend.agent import Agent
+from backend.agent import Agent, Settings, classify_intent_packet
 from backend.caps.documents import load_system_prompt
 from backend.flow.document_ops import handle_document_operation_request
 from backend.flow.knowledge_base import handle_knowledge_base_request
@@ -20,6 +21,7 @@ from backend.runtime import MCPHost, load_mcp_server_configs_from_env
 from backend.state.store import (
     build_session_id,
     generate_request_id,
+    latest_recent_candidate_list,
     load_memory_context,
     persist_doc_binding_from_tool_result,
     save_flow_event,
@@ -29,6 +31,20 @@ from backend.state.store import (
 
 
 ChatResult = dict[str, Any]
+
+
+def _build_routing_context(session_id: str) -> str:
+    recent_candidates = latest_recent_candidate_list(session_id, candidate_type="knowledge_base") or {}
+    candidates = recent_candidates.get("candidates") or []
+    if not isinstance(candidates, list) or not candidates:
+        return ""
+
+    lines = ["Recent knowledge-base candidates shown to the user:"]
+    for index, item in enumerate(candidates[:10], start=1):
+        if not isinstance(item, dict):
+            continue
+        lines.append(f"{index}. {item.get('file_name') or item.get('display_name') or ''}")
+    return "\n".join(lines)
 
 
 async def run_chat(payload: dict[str, Any]) -> ChatResult:
@@ -119,7 +135,25 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
             on_tool_result=on_tool_result,
             on_flow_event=lambda event_name, event_payload: emit_flow("flow", event_name, event_payload),
         )
-        reply = await agent.chat(user_text)
+        try:
+            reply = await asyncio.wait_for(
+                agent.chat(user_text),
+                timeout=Settings().agent_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            reply = "这次处理超时了。我没有继续执行不确定的动作。请直接重试，或明确告诉我你要操作的知识库文件/文档对象。"
+            save_turn(session_id, "assistant", reply, request_id=request_id)
+            emit_flow(
+                "flow",
+                "guard_hit",
+                {
+                    "guard_hit": [{"code": "agent_timeout", "detail": "safe_reply_after_timeout"}],
+                    "timeout_seconds": Settings().agent_timeout_seconds,
+                },
+            )
+            emit_flow("entry", "reply_generated", build_reply_generated_payload("assistant_timeout", reply))
+            emit_flow("flow", "stop_reason", build_stop_reason_payload("agent_timeout", "safe_reply_after_timeout"))
+            return {"reply": reply, "requestId": request_id}
         reply = reply or "No response generated."
         save_turn(session_id, "assistant", reply, request_id=request_id)
         emit_flow("entry", "reply_generated", build_reply_generated_payload("assistant_final", reply))
@@ -137,6 +171,29 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
             emit_flow("entry", "reply_generated", build_reply_generated_payload("ack_existing_upload", reply))
             emit_flow("flow", "stop_reason", build_stop_reason_payload("short_circuit", "upload_followup_confirmation"))
             return {"reply": reply, "requestId": request_id}
+
+        routing_memory_context = load_memory_context(session_id, include_bound_doc=True)
+        routing_context = _build_routing_context(session_id)
+        intent_packet = await classify_intent_packet(
+            content,
+            memory_context=routing_memory_context,
+            routing_context=routing_context,
+        )
+        emit_flow("flow", "intent_packet_created", intent_packet)
+
+        if str(intent_packet.get("intent_family") or "").strip() == "knowledge_base":
+            kb_result = handle_knowledge_base_request(session_id, request_id, content, intent_hint=intent_packet)
+            if kb_result:
+                delegate_message = kb_result.get("delegate_message")
+                if delegate_message:
+                    route_payload = dict(kb_result["route_payload"])
+                    emit_flow(
+                        "flow",
+                        "delegate_message_prepared",
+                        {"delegate_preview": str(delegate_message)[:200]},
+                    )
+                    return await run_agent_flow(delegate_message, include_bound_doc=True, route_payload=route_payload)
+                return finalize_direct(kb_result)
 
         runtime_for_doc_ops = await ensure_runtime()
         doc_result = await handle_document_operation_request(
@@ -157,7 +214,7 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
                 return await run_agent_flow(delegate_message, include_bound_doc=True, route_payload=route_payload)
             return finalize_direct(doc_result)
 
-        kb_result = handle_knowledge_base_request(session_id, request_id, content)
+        kb_result = handle_knowledge_base_request(session_id, request_id, content, intent_hint=intent_packet)
         if kb_result:
             delegate_message = kb_result.get("delegate_message")
             if delegate_message:

@@ -30,6 +30,7 @@ from backend.policy.knowledge_base import (
     is_best_doc_query,
     is_delete_request,
     is_export_request,
+    is_kb_file_management_intent,
     is_kb_list_request,
     is_kb_list_followup_request,
     is_rename_request,
@@ -47,9 +48,11 @@ from backend.policy.knowledge_base import (
 from backend.policy.routing import build_route_payload, build_selected_target
 from backend.state.store import (
     latest_route_selection,
+    latest_recent_candidate_list,
     latest_pending_action,
     latest_uploaded_file,
     resolve_pending_action,
+    save_recent_candidate_list,
     save_pending_action,
     update_uploaded_file_reference,
 )
@@ -110,6 +113,38 @@ def _select_record_from_pending(pending_payload: dict[str, Any], content: str) -
     if index is None:
         return None
     return resolve_record_by_index(candidates, index)
+
+
+def _recent_list_candidates(session_id: str) -> list[dict[str, Any]]:
+    payload = latest_recent_candidate_list(session_id, candidate_type="knowledge_base") or {}
+    candidates = payload.get("candidates") or []
+    if not isinstance(candidates, list):
+        return []
+    return [dict(item) for item in candidates if isinstance(item, dict)]
+
+
+def _select_record_from_recent_list(session_id: str, content: str) -> dict[str, Any] | None:
+    index = parse_candidate_selection(content)
+    if index is None:
+        return None
+    return resolve_record_by_index(_recent_list_candidates(session_id), index)
+
+
+def _intent_is(intent_hint: dict[str, Any] | None, *intent_names: str) -> bool:
+    if not isinstance(intent_hint, dict):
+        return False
+    return str(intent_hint.get("intent") or "").strip() in set(intent_names)
+
+
+def _save_recent_candidates(session_id: str, request_id: str, candidates: list[dict[str, Any]]) -> None:
+    if not candidates:
+        return
+    save_recent_candidate_list(
+        session_id,
+        request_id,
+        "knowledge_base",
+        [_serializable_record(item) for item in candidates],
+    )
 
 
 def _kb_candidate_not_found_result(
@@ -561,7 +596,13 @@ def handle_pending_knowledge_base_action(session_id: str, request_id: str, conte
     return None
 
 
-def handle_knowledge_base_request(session_id: str, request_id: str, content: str) -> dict[str, Any] | None:
+def handle_knowledge_base_request(
+    session_id: str,
+    request_id: str,
+    content: str,
+    *,
+    intent_hint: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     pending_result = handle_pending_knowledge_base_action(session_id, request_id, content)
     if pending_result:
         return pending_result
@@ -574,6 +615,7 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             source_type = "upload" if route_detail == "list_uploaded_files" else None
             records = list_pdf_records(source_type=source_type)
             scope_label = "你上传并纳入知识库的文件" if source_type == "upload" else "知识库"
+            _save_recent_candidates(session_id, request_id, records)
             return _build_result(
                 reply=build_kb_list_reply(records, show_all=True, scope_label=scope_label),
                 route_code="knowledge_base",
@@ -585,11 +627,14 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
                 stop_detail="list_files_full_followup",
             )
 
-    if is_kb_list_request(content):
+    if is_kb_list_request(content) or _intent_is(intent_hint, "kb.list"):
         show_all = wants_full_list(content)
         records = list_pdf_records()
         if records and not show_all and len(records) > 10:
             save_pending_action(session_id, "kb_list_scope", {"scope": "all"}, request_id=request_id)
+            _save_recent_candidates(session_id, request_id, records[:10])
+        else:
+            _save_recent_candidates(session_id, request_id, records)
         return _build_result(
             reply=build_kb_list_reply(
                 records,
@@ -605,11 +650,14 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             stop_detail="list_files_full" if show_all else "list_files",
         )
 
-    if is_uploaded_file_list_request(content):
+    if is_uploaded_file_list_request(content) or _intent_is(intent_hint, "kb.list_uploads"):
         records = list_pdf_records(source_type="upload")
         show_all = wants_full_list(content)
         if records and not show_all and len(records) > 10:
             save_pending_action(session_id, "kb_list_scope", {"scope": "upload"}, request_id=request_id)
+            _save_recent_candidates(session_id, request_id, records[:10])
+        else:
+            _save_recent_candidates(session_id, request_id, records)
         return _build_result(
             reply=build_kb_list_reply(
                 records,
@@ -645,8 +693,12 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             stop_detail="recent_upload_lookup",
         )
 
-    if is_export_request(content):
+    if is_export_request(content) or _intent_is(intent_hint, "kb.export"):
         candidates = _select_candidates_from_content(content, limit=5)
+        if not candidates:
+            recent_selected = _select_record_from_recent_list(session_id, content)
+            if recent_selected:
+                candidates = [_serializable_record(recent_selected)]
         if not candidates:
             return _kb_candidate_not_found_result(
                 route_detail="export_candidate_not_found",
@@ -686,6 +738,7 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             )
 
         save_pending_action(session_id, "kb_export_candidates", {"candidates": candidates[:3]}, request_id=request_id)
+        _save_recent_candidates(session_id, request_id, candidates[:3])
         lines = ["我先匹配到了这些候选文件："]
         for index, item in enumerate(candidates[:3], start=1):
             lines.append(f"{index}. {item['file_name']}：{item.get('match_reason') or '文件名相关'}")
@@ -703,8 +756,12 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             clarify_reason="need_candidate_selection",
         )
 
-    if is_delete_request(content):
+    if is_delete_request(content) or _intent_is(intent_hint, "kb.delete"):
         candidates = _select_candidates_from_content(content, limit=5)
+        if not candidates:
+            recent_selected = _select_record_from_recent_list(session_id, content)
+            if recent_selected:
+                candidates = [_serializable_record(recent_selected)]
         if not candidates:
             return _kb_candidate_not_found_result(
                 route_detail="delete_candidate_not_found",
@@ -730,6 +787,7 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             )
 
         save_pending_action(session_id, "kb_delete_candidates", {"candidates": candidates[:3]}, request_id=request_id)
+        _save_recent_candidates(session_id, request_id, candidates[:3])
         lines = ["我先匹配到了这些候选文件："]
         for index, item in enumerate(candidates[:3], start=1):
             lines.append(f"{index}. {item['file_name']}：{item.get('match_reason') or '文件名相关'}")
@@ -747,7 +805,7 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             clarify_reason="need_candidate_selection",
         )
 
-    if is_related_doc_query(content) or is_best_doc_query(content):
+    if is_related_doc_query(content) or is_best_doc_query(content) or _intent_is(intent_hint, "kb.related"):
         candidates = _select_candidates_from_content(content, limit=5)
         if not candidates:
             return _build_result(
@@ -776,6 +834,7 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             {"candidates": candidates[:3]},
             request_id=request_id,
         )
+        _save_recent_candidates(session_id, request_id, candidates[:3])
         return _build_result(
             reply=build_related_candidates_reply(
                 query=content,
@@ -795,15 +854,19 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             clarify_reason="need_candidate_selection",
         )
 
-    if is_rename_request(content):
+    if is_rename_request(content) or _intent_is(intent_hint, "kb.rename"):
         candidates = _select_candidates_from_content(content, limit=5)
         new_file_name = parse_new_file_name(content)
+        if not candidates:
+            recent_selected = _select_record_from_recent_list(session_id, content)
+            if recent_selected:
+                candidates = [_serializable_record(recent_selected)]
         if not candidates:
             return _build_result(
                 reply=build_rename_intro_reply(),
                 route_code="knowledge_base",
                 route_detail="rename_intro",
-                reasons=["knowledge_base_rename_request", "candidate_not_found"],
+                reasons=["knowledge_base_rename_request", "candidate_not_found", "intent_or_text_detected"],
                 selected_target=build_selected_target("knowledge_base", None, None, clear_reason="rename_target_missing"),
                 reply_type="clarify",
                 stop_code="clarify_waiting_user",
@@ -866,6 +929,7 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             {"candidates": candidates[:3], "new_file_name": new_file_name},
             request_id=request_id,
         )
+        _save_recent_candidates(session_id, request_id, candidates[:3])
         return _build_result(
             reply=build_rename_candidates_reply(candidates[:3]),
             route_code="knowledge_base",
@@ -877,6 +941,14 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             stop_detail="rename_candidate_selection_needed",
             clarify_needed=True,
             clarify_reason="need_rename_target_selection",
+        )
+
+    if is_kb_file_management_intent(intent_hint):
+        return _kb_candidate_not_found_result(
+            route_detail="knowledge_base_intent_unresolved",
+            reason_code=str(intent_hint.get("intent") or "knowledge_base_intent"),
+            clarify_reason="need_knowledge_base_target",
+            stop_detail="need_knowledge_base_target",
         )
 
     return None

@@ -609,6 +609,49 @@ def resolve_all_pending_actions(session_id: str, action_type: str | None = None)
         conn.commit()
 
 
+def save_recent_candidate_list(
+    session_id: str,
+    request_id: str | None,
+    candidate_type: str,
+    candidates: list[dict[str, Any]],
+) -> None:
+    session_id = str(session_id or "").strip()
+    candidate_type = str(candidate_type or "").strip()
+    if not session_id or not candidate_type:
+        return
+
+    resolve_all_pending_actions(session_id, action_type="recent_candidates")
+    save_pending_action(
+        session_id,
+        "recent_candidates",
+        {
+            "candidate_type": candidate_type,
+            "candidates": candidates,
+        },
+        request_id=request_id,
+    )
+
+
+def latest_recent_candidate_list(
+    session_id: str,
+    *,
+    candidate_type: str | None = None,
+    within_minutes: int = 120,
+) -> dict[str, Any] | None:
+    pending = latest_pending_action(
+        session_id,
+        action_type="recent_candidates",
+        within_minutes=within_minutes,
+    )
+    if not pending:
+        return None
+
+    payload = dict(pending.get("payload") or {})
+    if candidate_type and str(payload.get("candidate_type") or "").strip() != str(candidate_type).strip():
+        return None
+    return payload
+
+
 def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
     session_id = str(session_id or "").strip()
     if not session_id:

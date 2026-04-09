@@ -247,6 +247,30 @@
 - 用户问“我上传过哪些文件”，系统却混入固定知识库材料
 - 用户问知识库文件能否改名，系统却误转成企微文档标题语义
 
+### 8. 文件管理意图是否掉入 RAG
+
+以下情况默认自动检查：
+
+- `kb.rename`
+- `kb.delete`
+- `kb.export`
+
+这些意图不得调用 `rag.*`。
+
+### 9. tool 选择前是否已有 intent packet
+
+只要发生了 tool 选择，默认必须先存在结构化 intent packet。
+
+### 10. tool 执行后是否以 reply 或显式错误结束
+
+以下情况默认自动检查：
+
+- 有 tool 调用
+- 但没有 `reply_generated`
+- 也没有显式 `stop_reason`
+
+这类情况应直接判失败，不能静默挂住。
+
 ## evaluator
 
 evaluator 默认自动执行。

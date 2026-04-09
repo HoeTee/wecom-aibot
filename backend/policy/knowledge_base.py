@@ -4,8 +4,14 @@ import re
 from typing import Any
 
 
-ORDINAL_RE = re.compile(r"第\s*([0-9]{1,2})\s*[个篇份]?")
-RENAME_TARGET_RE = re.compile(r"(?:改名为|重命名为|改成|换成|命名为|叫做|叫)\s*[`\"']?([^\n`\"']+?)(?:[`\"']?\s*$|[`\"']?\s*[，。,！!？?])")
+ORDINAL_RE = re.compile(r"第\s*([0-9]{1,2})\s*(?:个|篇|份)?")
+RENAME_TARGET_RE = re.compile(
+    r"(?:改名为|重命名为|名字为|名称为|名字改成|名称改成|改成|换成|改为|命名为|叫做|叫)\s*[`\"']?([^\n`\"']+?)(?:[`\"']?\s*$|[`\"']?\s*[，。,！!？?])"
+)
+RENAME_NAME_STYLE_RE = re.compile(
+    r"(?:名字|名称|文件名|文档名)\s*(?:为|改为|改成|换成|叫做|叫)\s*[`\"']?([^\n`\"']+?)(?:[`\"']?\s*$|[`\"']?\s*[，。,！!？?])"
+)
+KB_FILE_MANAGEMENT_INTENTS = {"kb.export", "kb.rename", "kb.delete"}
 
 
 def _text(content: str) -> str:
@@ -105,10 +111,16 @@ def is_delete_request(text: str) -> bool:
 
 def is_rename_request(text: str) -> bool:
     normalized = _text(text)
-    return _contains_any(normalized, ("改名", "重命名", "换个名字", "改个名字")) and _contains_any(
-        normalized,
-        ("知识库", "文件", "文档", ".pdf", "PDF", "这些文件", "那篇"),
+    direct_rename = _contains_any(normalized, ("改名", "重命名", "换个名字", "改个名字"))
+    rename_with_name_field = (
+        _contains_any(normalized, ("名字", "名称", "文件名", "文档名"))
+        and _contains_any(normalized, ("修改", "改一下", "改下", "改为", "改成", "换成", "命名"))
     )
+    target_hint = _contains_any(
+        normalized,
+        ("知识库", "文件", "文档", ".pdf", "PDF", "这些文件", "那篇", "第", "份", "篇", "这个"),
+    )
+    return target_hint and (direct_rename or rename_with_name_field)
 
 
 def parse_candidate_selection(text: str) -> int | None:
@@ -119,6 +131,14 @@ def parse_candidate_selection(text: str) -> int | None:
     if normalized in {"这个", "就这个"}:
         return 0
     return None
+
+
+def is_kb_file_management_intent(intent_packet: dict[str, Any] | None) -> bool:
+    if not isinstance(intent_packet, dict):
+        return False
+    family = str(intent_packet.get("intent_family") or "").strip()
+    intent = str(intent_packet.get("intent") or "").strip()
+    return family == "knowledge_base" and intent in KB_FILE_MANAGEMENT_INTENTS
 
 
 def wants_original_file(text: str) -> bool:
@@ -152,6 +172,8 @@ def parse_new_file_name(text: str) -> str | None:
         return explicit_pdfs[-1]
 
     match = RENAME_TARGET_RE.search(normalized)
+    if not match:
+        match = RENAME_NAME_STYLE_RE.search(normalized)
     if not match:
         return None
     candidate = match.group(1).strip().strip("`\"'")

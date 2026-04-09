@@ -5,6 +5,7 @@ token tracking, and conversation logging.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any, Callable, Protocol
@@ -40,6 +41,139 @@ class Settings(BaseSettings):
     max_tool_calls: int = Field(10, alias="MAX_TOOL_CALLS")
     max_context_tokens: int = Field(100000, alias="MAX_CONTEXT_TOKENS")
     max_result_tokens: int = Field(5000, alias="MAX_RESULT_TOKENS")
+    routing_timeout_seconds: float = Field(15.0, alias="ROUTING_TIMEOUT_SECONDS")
+    agent_timeout_seconds: float = Field(60.0, alias="AGENT_TIMEOUT_SECONDS")
+
+
+INTENT_PACKET_SYSTEM_PROMPT = """
+You classify a user request for a WeCom document workflow system.
+
+Return JSON only with this shape:
+{
+  "intent_family": "knowledge_base" | "document" | "upload_followup" | "general",
+  "intent": string,
+  "target_ref": string,
+  "resolved_from_context": boolean,
+  "confidence": number,
+  "params": object,
+  "missing": [string]
+}
+
+Rules:
+- If the user is managing files in the knowledge base, use intent_family="knowledge_base".
+- File management includes list, list uploads, export original file, rename file, delete file, and related-file lookup.
+- Do not classify file-management requests as RAG or free-form chat.
+- If the user references an ordinal candidate such as "第4份文件", preserve it in target_ref and set resolved_from_context=true when recent candidates are provided.
+- Requests like "修改一下第4份文件的名字为 harness engineering" should be classified as knowledge_base + kb.rename when recent knowledge-base candidates are provided.
+- For rename requests, put the desired new file name in params.new_name when present.
+- If uncertain, still choose the closest family and include missing fields.
+- Allowed knowledge_base intents: kb.list, kb.list_uploads, kb.related, kb.export, kb.rename, kb.delete, kb.unknown
+- Allowed document intents: doc.edit, doc.create, doc.merge_kb, doc.replace_kb, doc.expand_kb, doc.unknown
+- Allowed upload_followup intent: upload.followup
+- Allowed general intent: agent.chat
+"""
+
+
+def _parse_json_object(raw: str) -> dict[str, Any]:
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start != -1 and end > start:
+            try:
+                return json.loads(text[start:end])
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def _normalize_intent_packet(packet: dict[str, Any], message: str) -> dict[str, Any]:
+    intent_family = str(packet.get("intent_family") or "general").strip() or "general"
+    intent = str(packet.get("intent") or "agent.chat").strip() or "agent.chat"
+    target_ref = str(packet.get("target_ref") or "").strip()
+    try:
+        confidence = float(packet.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    params = packet.get("params")
+    if not isinstance(params, dict):
+        params = {}
+    missing = packet.get("missing")
+    if not isinstance(missing, list):
+        missing = []
+
+    if intent_family not in {"knowledge_base", "document", "upload_followup", "general"}:
+        intent_family = "general"
+    if intent_family == "general" and intent == "agent.chat":
+        pass
+    elif intent_family == "knowledge_base" and not intent.startswith("kb."):
+        intent = "kb.unknown"
+    elif intent_family == "document" and not intent.startswith("doc."):
+        intent = "doc.unknown"
+    elif intent_family == "upload_followup" and intent != "upload.followup":
+        intent = "upload.followup"
+
+    return {
+        "intent_family": intent_family,
+        "intent": intent,
+        "target_ref": target_ref,
+        "resolved_from_context": bool(packet.get("resolved_from_context")),
+        "confidence": max(0.0, min(confidence, 1.0)),
+        "params": params,
+        "missing": [str(item).strip() for item in missing if str(item).strip()],
+        "message_preview": str(message or "")[:200],
+    }
+
+
+async def classify_intent_packet(
+    message: str,
+    *,
+    memory_context: str = "",
+    routing_context: str = "",
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    settings = settings or Settings()
+    client = AsyncOpenAI(
+        api_key=settings.api_key,
+        base_url=settings.base_url,
+    )
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": INTENT_PACKET_SYSTEM_PROMPT}]
+    if memory_context:
+        messages.append(
+            {
+                "role": "system",
+                "content": f"Session memory for routing:\n{memory_context}",
+            }
+        )
+    if routing_context:
+        messages.append(
+            {
+                "role": "system",
+                "content": f"Recent routing context:\n{routing_context}",
+            }
+        )
+    messages.append({"role": "user", "content": str(message or "")})
+
+    try:
+        completion = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=settings.model,
+                temperature=0.0,
+                top_p=1.0,
+                seed=settings.seed,
+                messages=messages,
+            ),
+            timeout=settings.routing_timeout_seconds,
+        )
+        content = completion.choices[0].message.content or ""
+        return _normalize_intent_packet(_parse_json_object(content), message)
+    except Exception:
+        return _normalize_intent_packet({}, message)
 
 
 class ToolRuntime(Protocol):

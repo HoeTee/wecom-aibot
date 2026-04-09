@@ -16,3 +16,12 @@ gates:
 
   - id: flow_checks_must_pass
     description: flow trace 必须包含 route、stop reason，以及 tool 执行前的 agent self-check。
+
+  - id: file_management_intent_must_not_call_rag
+    description: 文件管理意图必须留在 `kb.*` 动作边界内，不得掉入 `rag.*`。
+
+  - id: agent_intent_packet_must_exist_before_tool_selection
+    description: 只要发生 tool selection，就必须先有 agent 产出的结构化 intent packet。
+
+  - id: tool_execution_must_end_with_reply_or_explicit_error
+    description: tool 执行后必须产生 reply，或产生显式 stop_reason，不能静默挂住。

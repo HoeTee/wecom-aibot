@@ -82,6 +82,12 @@
 
 这一层负责编排，不负责真正干活。
 
+当前主路由原则：
+
+- agent 先产出结构化 `intent packet`
+- `flow` 再结合 `policy` 和 `state` 决定动作顺序
+- 文件管理意图不应自由掉回 `rag.*`
+
 ### 3. `policy`
 
 职责：
@@ -98,6 +104,18 @@
 当前对应：
 
 - `backend/policy/*`
+
+当前在路由上的位置是：
+
+- agent 主路由
+- `policy` 辅助校验和硬约束
+
+也就是：
+
+- `policy` 可以补强置信度
+- `policy` 可以拦截高风险动作
+- `policy` 可以要求确认
+- 但 `policy` 不应取代 agent 做主路由
 
 ### 4. `state`
 
