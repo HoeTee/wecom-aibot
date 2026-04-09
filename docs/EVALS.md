@@ -26,6 +26,14 @@ HE 已独立到 `he/`：
 - `scripts/run_eval_case.py`
 - `scripts/check_layers.py`
 
+## preflight
+
+每次业务场景评测前，先做一层基础设施 preflight：
+
+- 检查所有 `required: true` 的 stdio MCP server 是否能完成 initialize
+- 如果失败，业务场景应先判为基础设施失败
+- 对应 gate 是 `required_stdio_mcp_must_initialize`
+
 ## 当前场景
 
 当前已落地的代表性场景包括：
@@ -143,6 +151,7 @@ python scripts/run_eval_case.py --scenario-id upload_same_name_pdf_update_notice
 如果启用了层级检查，还会额外导出：
 
 - `he/runs/<run_id>/layer_checks.json`
+- `he/runs/<run_id>/required_stdio_boot.json`
 
 总 summary 默认输出到：
 

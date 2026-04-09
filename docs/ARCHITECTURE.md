@@ -181,6 +181,11 @@
 
 这些旧路径现在主要用于兼容旧 MCP 启动路径。
 
+`tools` 层里的 stdio wrapper 还必须满足一条额外约束：
+
+- 不能只做 import 转发
+- 必须在 `__main__` 中显式启动 `run(...)`
+
 ### 8. `he`
 
 职责：
@@ -282,6 +287,8 @@ HE 还要看层与层之间有没有断链。
   - 有没有选对能力和 tool
 - `runtime -> tools`
   - 有没有正确转发到实现层
+- `runtime -> tools`
+  - required stdio MCP server 能不能先完成 initialize
 
 所以分层不是为了抽象本身，而是为了让错误能被定位和验证。
 

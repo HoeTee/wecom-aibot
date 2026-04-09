@@ -108,6 +108,7 @@ he/
 - `flow_trace`
 - `run_eval_case`
 - `check_layers`
+- required stdio MCP boot preflight
 
 ## Source of Record
 
@@ -174,6 +175,11 @@ Invoke-WebRequest http://127.0.0.1:5000/health
 ```powershell
 .venv\Scripts\python.exe scripts\check_layers.py
 ```
+
+required stdio MCP 预检查：
+
+- `scripts/run_eval_case.py` 会在场景 gates 之前先检查所有 `required: true` 的 stdio MCP server 是否能完成 initialize
+- 如果失败，先看 `data/logs/mcp/<server_name>_stderr.log`
 
 MCP 连通性检查：
 

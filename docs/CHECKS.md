@@ -145,6 +145,14 @@
 
 以下项默认属于自动检查：
 
+### 0. required stdio MCP 是否先成功启动
+
+如果某个 `required: true` 的 stdio MCP server 不能完成 initialize：
+
+- 该轮业务场景不应继续视为有效
+- 应优先判为基础设施失败
+- 应输出对应的 child stderr 日志路径
+
 ### 1. 是否走错路由
 
 例如：
@@ -245,6 +253,7 @@ layer checks 也属于自动检查。
 1. 下层反向 import 上层
 2. production 代码 import `he/*`
 3. `flow` 直接依赖 `tools`
+4. stdio MCP wrapper 缺少 `__main__ -> run(...)` 入口
 
 ### 第一阶段策略
 

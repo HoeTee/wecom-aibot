@@ -10,6 +10,7 @@ agent 通过 MCP tools 调用外部能力，而不是直接自由执行本地命
 - 新的主编辑位置优先收敛到 `backend/runtime/*`
 - 真正的本地 tool 实现优先收敛到 `backend/tools/*`
 - 本地 `stdio` MCP 服务如果启动即退出，应优先检查 `data/logs/mcp/<server_name>_stderr.log`
+- `runtime` 在 stdio 连接失败时，应同时记录 `command`、`args`、`cwd` 和对应 stderr 日志路径
 
 ## 分层关系
 
@@ -40,6 +41,7 @@ agent 通过 MCP tools 调用外部能力，而不是直接自由执行本地命
 - 用户没有明确要求新建文档时，后续编辑不应新建文档
 - 调用 `llamaindex_rag` 前，允许做面向检索的 query 改写，但不能丢失用户明确提出的内容要求、结构要求和补充要求
 - 本地 `stdio` tool 不应在模块 import 阶段做重型初始化；应优先采用 lazy init，避免 MCP 握手前子进程直接退出
+- 本地 `stdio` wrapper 不应只做 import 转发；必须在 `__main__` 中显式启动 `run(...)`
 
 ## 当前边界
 

@@ -87,6 +87,10 @@ def _suggested_refactor_for_rule(rule_id: str) -> dict[str, Any]:
             "primary": {"layer": "runtime", "directory": "backend/runtime/"},
             "secondary": {"layer": "caps", "directory": "backend/caps/"},
         },
+        "mcp_wrapper_missing_entrypoint": {
+            "primary": {"layer": "tools", "directory": "backend/mcp_server_local/"},
+            "secondary": {"layer": "runtime", "directory": "backend/runtime/"},
+        },
     }
     return mapping.get(
         rule_id,
@@ -95,6 +99,43 @@ def _suggested_refactor_for_rule(rule_id: str) -> dict[str, Any]:
             "secondary": {"layer": "caps", "directory": "backend/caps/"},
         },
     )
+
+
+def _iter_stdio_wrapper_files() -> list[Path]:
+    wrapper_root = PROJECT_ROOT / "backend" / "mcp_server_local"
+    if not wrapper_root.exists():
+        return []
+    return sorted(path for path in wrapper_root.rglob("mcp_*.py"))
+
+
+def _has_stdio_entrypoint(path: Path) -> bool:
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+
+    for node in tree.body:
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if not (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "__name__"
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.Eq)
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value == "__main__"
+        ):
+            continue
+
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            if isinstance(func, ast.Attribute) and func.attr == "run":
+                return True
+
+    return False
 
 
 def run_layer_checks(project_root: Path | None = None) -> dict[str, Any]:
@@ -139,6 +180,23 @@ def run_layer_checks(project_root: Path | None = None) -> dict[str, Any]:
                     "suggested_refactor_target": _suggested_refactor_for_rule(rule_id),
                 }
             )
+
+    for path in _iter_stdio_wrapper_files():
+        if _has_stdio_entrypoint(path):
+            continue
+        violations.append(
+            {
+                "rule_id": "mcp_wrapper_missing_entrypoint",
+                "violated_rule": "stdio MCP wrapper 必须在 __main__ 中显式启动 server.run(...)。",
+                "source_file": str(path.relative_to(root)).replace("\\", "/"),
+                "target_module": "",
+                "source_layer": "tools",
+                "target_layer": "tools",
+                "suggested_refactor_target": _suggested_refactor_for_rule(
+                    "mcp_wrapper_missing_entrypoint"
+                ),
+            }
+        )
 
     return {"passed": not violations, "violations": violations}
 

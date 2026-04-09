@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -22,8 +25,11 @@ except ImportError:  # pragma: no cover - module import path differs when run wi
     from scripts.check_layers import run_layer_checks
 
 from backend.memory import init_db
+from backend.runtime.config import load_mcp_host_config, load_mcp_server_configs_from_env
+from backend.runtime.connection import MCPServerConnection
 
 DB_PATH = PROJECT_ROOT / "data" / "memory.sqlite3"
+DEFAULT_MCP_CONFIG_PATH = PROJECT_ROOT / "config" / "mcp_servers.json"
 HE_DIR = PROJECT_ROOT / "he"
 SCENARIOS_DIR = HE_DIR / "scenarios"
 RUNS_DIR = HE_DIR / "runs"
@@ -61,6 +67,66 @@ def git_commit() -> str:
         )
     except Exception:
         return ""
+
+
+def load_server_configs() -> list[Any]:
+    load_dotenv(PROJECT_ROOT / ".env")
+    server_configs = load_mcp_server_configs_from_env(os.environ)
+    if server_configs:
+        return server_configs
+    if DEFAULT_MCP_CONFIG_PATH.exists():
+        return load_mcp_host_config(DEFAULT_MCP_CONFIG_PATH).servers
+    return []
+
+
+async def _required_stdio_boot_async() -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    for config in load_server_configs():
+        if config.transport != "stdio" or not config.required:
+            continue
+
+        connection = MCPServerConnection(config)
+        stderr_log_path = (
+            PROJECT_ROOT / "data" / "logs" / "mcp" / f"{config.name}_stderr.log"
+        )
+        try:
+            await connection.connect()
+            results.append(
+                {
+                    "server_name": config.name,
+                    "transport": config.transport,
+                    "command": config.command,
+                    "args": list(config.args),
+                    "cwd": config.cwd,
+                    "stderr_log_path": str(stderr_log_path),
+                    "passed": True,
+                    "reason": "required stdio MCP server initialized successfully.",
+                }
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "server_name": config.name,
+                    "transport": config.transport,
+                    "command": config.command,
+                    "args": list(config.args),
+                    "cwd": config.cwd,
+                    "stderr_log_path": str(stderr_log_path),
+                    "passed": False,
+                    "reason": str(exc),
+                }
+            )
+        finally:
+            await connection.cleanup()
+
+    return {
+        "passed": all(item["passed"] for item in results) if results else True,
+        "checks": results,
+    }
+
+
+def required_stdio_boot_check() -> dict[str, Any]:
+    return asyncio.run(_required_stdio_boot_async())
 
 
 def latest_user_turn(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row:
@@ -478,6 +544,9 @@ def suggested_fix_layers(failed_gate_ids: list[str], layer_check_passed: bool) -
     if not layer_check_passed:
         primary = {"layer": "runtime", "directory": "backend/runtime/"}
         secondary = {"layer": "tools", "directory": "backend/tools/"}
+    elif "required_stdio_mcp_must_initialize" in failed_gate_ids:
+        primary = {"layer": "tools", "directory": "backend/mcp_server_local/"}
+        secondary = {"layer": "runtime", "directory": "backend/runtime/"}
     elif any(gate_id in failed_gate_ids for gate_id in ("must_bind_doc_triple", "must_reuse_existing_doc_on_followup")):
         primary = {"layer": "state", "directory": "backend/state/store.py"}
         secondary = {"layer": "runtime", "directory": "backend/runtime/"}
@@ -555,6 +624,8 @@ def main() -> None:
 
     run_dir = RUNS_DIR / args.run_id / args.scenario_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    stdio_boot = required_stdio_boot_check()
+    dump_json(RUNS_DIR / args.run_id / "required_stdio_boot.json", stdio_boot)
 
     with connect() as conn:
         user_turn = latest_user_turn(conn, args.session_id)
@@ -597,6 +668,24 @@ def main() -> None:
     dump_json(run_dir / "flow_trace.json", build_flow_trace(metadata, flow_rows))
 
     gate_results: list[dict[str, Any]] = []
+    if stdio_boot["checks"]:
+        failed_servers = [item["server_name"] for item in stdio_boot["checks"] if not item["passed"]]
+        gate_results.append(
+            {
+                "id": "required_stdio_mcp_must_initialize",
+                "scope": "global",
+                "description": global_gate_catalog.get(
+                    "required_stdio_mcp_must_initialize",
+                    "所有 required stdio MCP server 必须先完成 initialize。",
+                ),
+                "passed": stdio_boot["passed"],
+                "reason": (
+                    "所有 required stdio MCP server 已成功 initialize。"
+                    if stdio_boot["passed"]
+                    else f"以下 required stdio MCP server 初始化失败：{failed_servers}"
+                ),
+            }
+        )
     for gate_id in scenario.get("global_gates", []):
         passed, reason = evaluate_global_gate(gate_id, assistant_reply, tool_calls, doc_binding, user_request)
         gate_results.append(

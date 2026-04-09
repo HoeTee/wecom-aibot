@@ -23,6 +23,7 @@ he/
 - `runs/`：单次运行证据包
 - `reports/`：总报告和 maintenance 输出
 - `review_template.md`：最终 human review 模板
+- 业务场景前还应先做 required stdio MCP boot preflight
 
 ## 执行入口
 

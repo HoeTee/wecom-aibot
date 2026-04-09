@@ -50,6 +50,13 @@ class MCPServerConnection:
             self.logger.error("Error connecting to MCP server '%s': %s", self.config.name, exc)
             if self.config.transport == "stdio":
                 self.logger.error(
+                    "stdio launch details for '%s': command=%s args=%s cwd=%s",
+                    self.config.name,
+                    self.config.command,
+                    self.config.args,
+                    self.config.cwd,
+                )
+                self.logger.error(
                     "MCP server '%s' uses stdio. Check child stderr log: %s",
                     self.config.name,
                     PROJECT_ROOT / "data" / "logs" / "mcp" / f"{self.config.name}_stderr.log",
