@@ -65,6 +65,7 @@ data/
   logs/
     mcp/
       mcp_client.log        # MCP 客户端日志
+      llamaindex_rag_stderr.log  # 本地 llamaindex_rag stdio 子进程 stderr
 ```
 
 `manifest/`、`persist/`、`logs/` 不再作为根目录一级结构存在。

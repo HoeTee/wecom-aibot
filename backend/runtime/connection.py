@@ -4,6 +4,7 @@ import json
 import os
 import traceback
 from contextlib import AsyncExitStack
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -14,6 +15,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 from .config import MCPServerConfig
 from .mcp_logger import logger
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class MCPServerConnection:
@@ -45,6 +48,12 @@ class MCPServerConnection:
             )
         except Exception as exc:
             self.logger.error("Error connecting to MCP server '%s': %s", self.config.name, exc)
+            if self.config.transport == "stdio":
+                self.logger.error(
+                    "MCP server '%s' uses stdio. Check child stderr log: %s",
+                    self.config.name,
+                    PROJECT_ROOT / "data" / "logs" / "mcp" / f"{self.config.name}_stderr.log",
+                )
             traceback.print_exc()
             raise
 
