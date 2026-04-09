@@ -5,8 +5,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from werkzeug.utils import secure_filename
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 KNOWLEDGE_BASE_PAPER_DIR = PROJECT_ROOT / "knowledge_base" / "papers"
@@ -28,6 +26,7 @@ GENERIC_QUERY_TOKENS = {
     "删掉",
 }
 EXPLICIT_PDF_RE = re.compile(r"([0-9A-Za-z._-]+\.pdf)", re.IGNORECASE)
+INVALID_FILE_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def sha256_bytes(content: bytes) -> str:
@@ -35,11 +34,13 @@ def sha256_bytes(content: bytes) -> str:
 
 
 def normalize_pdf_filename(filename: str) -> str:
-    normalized = secure_filename(str(filename or "").strip())
+    normalized = str(filename or "").strip()
+    normalized = INVALID_FILE_CHARS_RE.sub("_", normalized)
+    normalized = normalized.strip().strip(".")
     if not normalized:
         normalized = "uploaded.pdf"
     if not normalized.lower().endswith(".pdf"):
-        normalized = f"{Path(normalized).stem or 'uploaded'}.pdf"
+        normalized = f"{normalized or 'uploaded'}.pdf"
     return normalized
 
 
@@ -73,15 +74,18 @@ def _source_type(path: Path) -> str:
     return "upload" if KNOWLEDGE_BASE_UPLOAD_DIR in path.parents else "base"
 
 
-def list_pdf_records() -> list[dict[str, Any]]:
+def list_pdf_records(source_type: str | None = None) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for path in knowledge_base_pdf_paths():
+        current_source_type = _source_type(path)
+        if source_type and current_source_type != source_type:
+            continue
         records.append(
             {
                 "file_name": _display_name(path),
                 "stored_name": path.name,
                 "stored_path": relative_project_path(path),
-                "source_type": _source_type(path),
+                "source_type": current_source_type,
             }
         )
     return records
@@ -152,7 +156,7 @@ def _score_record(record: dict[str, Any], query: str) -> tuple[int, str]:
     return (score, "；".join(reasons))
 
 
-def match_pdf_records(query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+def match_pdf_records(query: str, *, limit: int = 10, source_type: str | None = None) -> list[dict[str, Any]]:
     explicit_name = _explicit_pdf_reference(query)
     if explicit_name:
         exact = find_record_by_file_name(explicit_name)
@@ -163,7 +167,7 @@ def match_pdf_records(query: str, *, limit: int = 10) -> list[dict[str, Any]]:
             return [enriched]
 
     scored: list[tuple[int, str, dict[str, Any]]] = []
-    for record in list_pdf_records():
+    for record in list_pdf_records(source_type=source_type):
         score, reason = _score_record(record, query)
         if score <= 0:
             continue
@@ -182,14 +186,18 @@ def resolve_record_by_index(candidates: list[dict[str, Any]], index: int) -> dic
     return candidates[index]
 
 
-def find_record_by_file_name(file_name: str) -> dict[str, Any] | None:
+def find_record_by_file_name(file_name: str, *, source_type: str | None = None) -> dict[str, Any] | None:
     normalized = str(file_name or "").strip().lower()
     if not normalized:
         return None
-    for record in list_pdf_records():
+    for record in list_pdf_records(source_type=source_type):
         if str(record["file_name"]).strip().lower() == normalized:
             return record
     return None
+
+
+def can_rename_record(record: dict[str, Any]) -> bool:
+    return str(record.get("source_type") or "") == "upload"
 
 
 def build_recent_upload_fallback_candidates(limit: int = 3) -> list[dict[str, Any]]:
@@ -205,6 +213,38 @@ def delete_record(record: dict[str, Any]) -> None:
     if not path.exists():
         raise FileNotFoundError(path)
     path.unlink()
+
+
+def rename_record(record: dict[str, Any], new_file_name: str) -> dict[str, Any]:
+    if not can_rename_record(record):
+        raise PermissionError("only uploaded knowledge-base files can be renamed")
+
+    source_path = export_record_path(record)
+    if not source_path.exists():
+        raise FileNotFoundError(source_path)
+
+    normalized_new_name = normalize_pdf_filename(new_file_name)
+    target_path = KNOWLEDGE_BASE_UPLOAD_DIR / upload_storage_name(normalized_new_name)
+    if target_path.resolve() == source_path.resolve():
+        return {
+            "old_file_name": record["file_name"],
+            "new_file_name": _display_name(target_path),
+            "old_stored_path": record["stored_path"],
+            "new_stored_path": relative_project_path(target_path),
+            "action": "unchanged",
+        }
+    if target_path.exists():
+        raise FileExistsError(target_path)
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.rename(target_path)
+    return {
+        "old_file_name": record["file_name"],
+        "new_file_name": _display_name(target_path),
+        "old_stored_path": record["stored_path"],
+        "new_stored_path": relative_project_path(target_path),
+        "action": "renamed",
+    }
 
 
 def store_pdf_in_knowledge_base(file_bytes: bytes, original_name: str) -> dict[str, str | None]:

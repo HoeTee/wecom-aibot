@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - module import path differs when run wi
     from scripts.check_layers import run_layer_checks
 
 from backend.memory import init_db
+from backend.caps.knowledge_base import list_pdf_records
 from backend.runtime.config import load_mcp_host_config, load_mcp_server_configs_from_env
 from backend.runtime.connection import MCPServerConnection
 
@@ -363,6 +364,15 @@ def latest_attachment_payload(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
     }
 
 
+def latest_route_selected(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    for row in reversed(flow_rows):
+        if row["event_name"] != "route_selected":
+            continue
+        payload = parse_args_json(row["payload_json"])
+        return dict(payload.get("route_selected") or {})
+    return {}
+
+
 def evaluate_global_gate(
     gate_id: str,
     assistant_reply: str,
@@ -417,6 +427,7 @@ def evaluate_scenario_gate(
     write_payload = latest_doc_write_payload(tool_calls)
     content = str(write_payload["args"].get("content", "") or "")
     tool_names = [row["tool_name"] for row in tool_calls]
+    route_selected = latest_route_selected(flow_rows)
 
     if gate_id == "fresh_regenerate_must_not_reuse_existing_doc":
         if "重新生成" in user_request and "文档" in user_request:
@@ -517,6 +528,45 @@ def evaluate_scenario_gate(
         if "确认删除" in assistant_reply or ("删除" in assistant_reply and "确认" in assistant_reply):
             return True, "删除前已要求确认。"
         return False, "删除流程没有要求确认。"
+
+    if gate_id == "kb_list_followup_must_honor_full_scope":
+        total = len(list_pdf_records())
+        list_lines = [line for line in assistant_reply.splitlines() if re.match(r"^\d+\.\s", line.strip())]
+        if route_selected.get("detail") in {"list_files_followup_full", "list_files_full"} and len(list_lines) >= total:
+            return True, "用户强调全量列表后，系统返回了全部知识库文件。"
+        return False, "用户强调全量列表后，系统仍未返回全部知识库文件。"
+
+    if gate_id == "kb_uploaded_list_must_only_show_uploaded_files":
+        uploaded_names = {item["file_name"] for item in list_pdf_records(source_type="upload")}
+        base_names = {item["file_name"] for item in list_pdf_records(source_type="base")}
+        list_lines = [line.strip() for line in assistant_reply.splitlines() if re.match(r"^\d+\.\s", line.strip())]
+        mentioned = []
+        for line in list_lines:
+            _, _, tail = line.partition(".")
+            mentioned.append(tail.strip().split("：", 1)[0].strip())
+        if route_selected.get("detail") not in {"list_uploaded_files", "list_uploaded_files_full"}:
+            return False, "上传文件列表请求没有进入 uploaded files 路由。"
+        if any(name in base_names for name in mentioned):
+            return False, "上传文件列表中混入了固定知识库材料。"
+        if mentioned and all(name in uploaded_names for name in mentioned):
+            return True, "上传文件列表只返回了上传文件。"
+        return False, "上传文件列表没有返回明确的上传文件集合。"
+
+    if gate_id == "kb_rename_request_must_stay_in_knowledge_base_scope":
+        if route_selected.get("code") != "knowledge_base":
+            return False, "知识库改名请求没有进入 knowledge_base 路由。"
+        if any(token in assistant_reply for token in ("企业微信文档", "企微文档", "文档标题")):
+            return False, "知识库改名请求错误回到了企微文档语义。"
+        if any(token in assistant_reply for token in ("改名", "重命名", "新名字")):
+            return True, "知识库改名请求保持在知识库文件语义内。"
+        return False, "知识库改名请求没有给出明确的知识库文件改名响应。"
+
+    if gate_id == "kb_rename_specific_file_must_prepare_confirmation":
+        if route_selected.get("detail") != "rename_confirm":
+            return False, "明确文件名和新名称后，没有进入 rename_confirm 路由。"
+        if any(token in assistant_reply for token in ("确认改名", "改名为")):
+            return True, "明确改名请求后，系统先进入确认。"
+        return False, "明确改名请求后，系统没有准备确认步骤。"
 
     if gate_id == "doc_merge_must_confirm_target_source_action":
         required_tokens = ("目标文档", "来源文档", "动作")

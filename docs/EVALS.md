@@ -97,19 +97,43 @@ HE 已独立到 `he/`：
 
 - 删除流程是否先确认，再执行
 
-### 10. `doc_merge_kb_into_current`
+### 10. `kb_list_all_files_followup`
+
+抓：
+
+- 用户强调“把所有文件都列出来”后，系统是否真的返回完整列表
+
+### 11. `kb_uploaded_files_scope`
+
+抓：
+
+- 用户问自己上传过哪些文件时，系统是否只返回上传文件集合
+
+### 12. `kb_rename_request_scope`
+
+抓：
+
+- 知识库改名请求是否保持在知识库文件管理语义内，而不是误转成企微文档标题语义
+
+### 13. `kb_rename_confirmation`
+
+抓：
+
+- 用户明确给出原文件名和新名称后，系统是否先进入确认步骤
+
+### 14. `doc_merge_kb_into_current`
 
 抓：
 
 - 并入当前文档前，是否确认目标文档、来源文档和动作
 
-### 11. `doc_replace_kb_section`
+### 15. `doc_replace_kb_section`
 
 抓：
 
 - 替换前，是否先展示将被替换的章节预览
 
-### 12. `doc_expand_kb_section`
+### 16. `doc_expand_kb_section`
 
 抓：
 
@@ -124,6 +148,10 @@ python scripts/run_eval_case.py --scenario-id pdf_3papers_create_summary_doc --s
 python scripts/run_eval_case.py --scenario-id upload_pdf_add_to_knowledge_base --session-id dm:14292
 python scripts/run_eval_case.py --scenario-id upload_duplicate_pdf_notice --session-id dm:14292
 python scripts/run_eval_case.py --scenario-id upload_same_name_pdf_update_notice --session-id dm:14292
+python scripts/run_eval_case.py --scenario-id kb_list_all_files_followup --session-id dm:14292
+python scripts/run_eval_case.py --scenario-id kb_uploaded_files_scope --session-id dm:14292
+python scripts/run_eval_case.py --scenario-id kb_rename_request_scope --session-id dm:14292
+python scripts/run_eval_case.py --scenario-id kb_rename_confirmation --session-id dm:14292
 ```
 
 其中：

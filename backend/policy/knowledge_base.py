@@ -5,6 +5,7 @@ from typing import Any
 
 
 ORDINAL_RE = re.compile(r"第\s*([0-9]{1,2})\s*[个篇份]?")
+RENAME_TARGET_RE = re.compile(r"(?:改名为|重命名为|改成|换成|命名为|叫做|叫)\s*[`\"']?([^\n`\"']+?)(?:[`\"']?\s*$|[`\"']?\s*[，。,！!？?])")
 
 
 def _text(content: str) -> str:
@@ -33,9 +34,21 @@ def is_affirmative(text: str) -> bool:
 
 def is_kb_list_request(text: str) -> bool:
     normalized = _text(text)
+    if _contains_any(normalized, ("全列出来", "全部列出来", "所有文件", "全部文件", "知识库现有哪些文件")):
+        return True
     if not _contains_any(normalized, ("知识库",)):
         return False
     return _contains_any(normalized, ("几篇", "列一下", "列表", "文件", "文章"))
+
+
+def is_kb_list_followup_request(text: str) -> bool:
+    normalized = _text(text)
+    return _contains_any(normalized, ("全列出来", "全部列出来", "都列出来", "所有", "全部", "不是只有前"))
+
+
+def wants_full_list(text: str) -> bool:
+    normalized = _text(text)
+    return _contains_any(normalized, ("所有", "全部", "全列", "都列出来", "不是只有前"))
 
 
 def wants_brief_answer(text: str) -> bool:
@@ -51,6 +64,14 @@ def asks_upload_label(text: str) -> bool:
 def asks_recent_uploaded_file(text: str) -> bool:
     normalized = _text(text)
     return _contains_any(normalized, ("刚上传的文档", "刚上传的文件", "刚上传的 pdf", "刚上传的PDF"))
+
+
+def is_uploaded_file_list_request(text: str) -> bool:
+    normalized = _text(text)
+    return _contains_any(
+        normalized,
+        ("我上传的", "已上传的", "上传过的", "之前上传过", "上传的文件", "上传的文档"),
+    )
 
 
 def is_related_doc_query(text: str) -> bool:
@@ -79,6 +100,14 @@ def is_delete_request(text: str) -> bool:
     return _contains_any(normalized, ("删掉", "删除", "移除")) and _contains_any(
         normalized,
         ("知识库", "文档", "文件", "那篇"),
+    )
+
+
+def is_rename_request(text: str) -> bool:
+    normalized = _text(text)
+    return _contains_any(normalized, ("改名", "重命名", "换个名字", "改个名字")) and _contains_any(
+        normalized,
+        ("知识库", "文件", "文档", ".pdf", "PDF", "这些文件", "那篇"),
     )
 
 
@@ -116,6 +145,20 @@ def candidate_action_is_clear(text: str) -> bool:
     return wants_original_file(text) or wants_summary(text) or wants_generate_doc(text)
 
 
+def parse_new_file_name(text: str) -> str | None:
+    normalized = _text(text)
+    explicit_pdfs = re.findall(r"([0-9A-Za-z\u4e00-\u9fff._-]+\.pdf)", normalized, flags=re.IGNORECASE)
+    if len(explicit_pdfs) >= 2:
+        return explicit_pdfs[-1]
+
+    match = RENAME_TARGET_RE.search(normalized)
+    if not match:
+        return None
+    candidate = match.group(1).strip().strip("`\"'")
+    candidate = candidate.rstrip("，。,！!？?")
+    return candidate or None
+
+
 def build_candidate_lines(
     candidates: list[dict[str, Any]],
     *,
@@ -137,16 +180,21 @@ def build_kb_list_reply(
     *,
     show_only_count: bool = False,
     limit: int = 10,
+    show_all: bool = False,
+    scope_label: str = "知识库",
 ) -> str:
     total = len(records)
     if show_only_count:
-        return f"知识库里目前有 {total} 篇 PDF。如需我可以继续列出前 {min(limit, total)} 篇。"
+        return f"{scope_label}里目前共有 {total} 个 PDF 文件。"
 
-    lines = [f"知识库里目前有 {total} 篇 PDF。"]
+    lines = [f"{scope_label}里目前共有 {total} 个 PDF 文件。"]
     if total:
-        lines.append(f"先列前 {min(limit, total)} 篇：")
-        for index, item in enumerate(records[:limit], start=1):
+        selected_records = records if show_all else records[:limit]
+        lines.append("全部列出如下：" if show_all or total <= limit else f"先列前 {min(limit, total)} 个：")
+        for index, item in enumerate(selected_records, start=1):
             lines.append(f"{index}. {item['file_name']}")
+        if not show_all and total > limit:
+            lines.append(f"如果你要看全部 {total} 个文件，直接说“把所有文件都列出来”。")
     return "\n".join(lines)
 
 
@@ -180,6 +228,31 @@ def build_export_clarify_reply(file_name: str) -> str:
 
 def build_delete_confirm_reply(file_name: str) -> str:
     return f"我匹配到的是 `{file_name}`。如果确认删除，请直接回复“确认删除”。"
+
+
+def build_rename_intro_reply() -> str:
+    return (
+        "可以处理知识库文件改名，但当前只支持重命名你上传进知识库的 PDF。"
+        "请告诉我你想改的文件名，以及新名称。"
+    )
+
+
+def build_rename_new_name_reply(file_name: str) -> str:
+    return f"你想把 `{file_name}` 改成什么新名字？请直接告诉我新的文件名。"
+
+
+def build_rename_candidates_reply(candidates: list[dict[str, Any]]) -> str:
+    lines = ["我先匹配到了这些候选文件：", build_candidate_lines(candidates, limit=3)]
+    lines.append("请告诉我要改哪一个文件，以及你想改成什么名字。")
+    return "\n".join(lines)
+
+
+def build_rename_confirm_reply(old_file_name: str, new_file_name: str) -> str:
+    return f"我准备把 `{old_file_name}` 改名为 `{new_file_name}`。如果确认，请直接回复“确认改名”。"
+
+
+def build_rename_unsupported_reply(file_name: str) -> str:
+    return f"`{file_name}` 属于固定知识库材料，当前不支持直接改名。你上传的 PDF 文件支持改名。"
 
 
 def build_recent_upload_reply(record: dict[str, Any] | None, fallback_candidates: list[dict[str, Any]] | None = None) -> str:

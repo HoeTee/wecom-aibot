@@ -413,6 +413,38 @@ def latest_uploaded_file(session_id: str, within_minutes: int = 30) -> dict[str,
     return dict(row) if row else None
 
 
+def update_uploaded_file_reference(old_stored_path: str, new_file_name: str, new_stored_path: str) -> None:
+    old_stored_path = str(old_stored_path or "").strip()
+    new_file_name = str(new_file_name or "").strip()
+    new_stored_path = str(new_stored_path or "").strip()
+    if not old_stored_path or not new_file_name or not new_stored_path:
+        return
+
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE session_uploaded_files
+            SET file_name = ?,
+                stored_path = ?,
+                matched_stored_path = CASE
+                    WHEN matched_stored_path = ? THEN ?
+                    ELSE matched_stored_path
+                END
+            WHERE stored_path = ?
+               OR matched_stored_path = ?
+            """,
+            (
+                new_file_name,
+                new_stored_path,
+                old_stored_path,
+                new_stored_path,
+                old_stored_path,
+                old_stored_path,
+            ),
+        )
+        conn.commit()
+
+
 def current_bound_doc(session_id: str) -> dict[str, Any] | None:
     session_id = str(session_id or "").strip()
     if not session_id:
@@ -653,3 +685,34 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
         "Rule: when the user refers to the previous or last document, prefer the currently bound doc_id recorded here unless the user explicitly asks for a new document.\n\n"
         + "\n\n".join(sections)
     )
+
+
+def latest_route_selection(session_id: str, within_minutes: int = 30) -> dict[str, Any] | None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT request_id, payload_json, created_at
+            FROM flow_events
+            WHERE session_id = ?
+              AND event_name = 'route_selected'
+              AND created_at >= datetime('now', ?)
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (session_id, f"-{int(within_minutes)} minute"),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    payload["request_id"] = row["request_id"]
+    payload["created_at"] = row["created_at"]
+    return payload

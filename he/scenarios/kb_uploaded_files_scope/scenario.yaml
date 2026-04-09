@@ -1,0 +1,12 @@
+id: kb_uploaded_files_scope
+goal: 当用户询问自己上传过哪些文件时，系统应只返回上传文件集合，不应混入固定知识库材料。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+scenario_gates:
+  - id: kb_uploaded_list_must_only_show_uploaded_files
+    description: 上传文件列表请求必须只返回上传文件，不混入固定材料。
+artifact_focus:
+  - assistant_reply
+  - flow_trace
+  - evaluator

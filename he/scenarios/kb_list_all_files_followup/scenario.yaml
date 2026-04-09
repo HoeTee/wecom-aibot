@@ -1,0 +1,13 @@
+id: kb_list_all_files_followup
+goal: 当用户在知识库列表后继续强调“把所有文件都列出来”时，系统应返回完整文件列表，而不是继续截断或转到其他语义。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+  - turns/turn_2.txt
+scenario_gates:
+  - id: kb_list_followup_must_honor_full_scope
+    description: 用户明确要求全量列表后，系统必须返回全部知识库文件。
+artifact_focus:
+  - assistant_reply
+  - flow_trace
+  - evaluator

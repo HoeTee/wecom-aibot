@@ -4,10 +4,12 @@ from typing import Any
 
 from backend.caps.knowledge_base import (
     build_recent_upload_fallback_candidates,
+    can_rename_record,
     delete_record,
     export_record_path,
     list_pdf_records,
     match_pdf_records,
+    rename_record,
     resolve_record_by_index,
 )
 from backend.policy.knowledge_base import (
@@ -16,6 +18,11 @@ from backend.policy.knowledge_base import (
     build_delete_confirm_reply,
     build_export_clarify_reply,
     build_kb_list_reply,
+    build_rename_candidates_reply,
+    build_rename_confirm_reply,
+    build_rename_intro_reply,
+    build_rename_new_name_reply,
+    build_rename_unsupported_reply,
     build_recent_upload_reply,
     build_related_candidates_reply,
     candidate_action_is_clear,
@@ -24,8 +31,13 @@ from backend.policy.knowledge_base import (
     is_delete_request,
     is_export_request,
     is_kb_list_request,
+    is_kb_list_followup_request,
+    is_rename_request,
     is_related_doc_query,
+    is_uploaded_file_list_request,
     parse_candidate_selection,
+    parse_new_file_name,
+    wants_full_list,
     wants_brief_answer,
     wants_generate_doc,
     wants_original_file,
@@ -34,10 +46,12 @@ from backend.policy.knowledge_base import (
 )
 from backend.policy.routing import build_route_payload, build_selected_target
 from backend.state.store import (
+    latest_route_selection,
     latest_pending_action,
     latest_uploaded_file,
     resolve_pending_action,
     save_pending_action,
+    update_uploaded_file_reference,
 )
 
 
@@ -86,8 +100,8 @@ def _build_result(
     }
 
 
-def _select_candidates_from_content(content: str, *, limit: int = 5) -> list[dict[str, Any]]:
-    return [_serializable_record(item) for item in match_pdf_records(content, limit=limit)]
+def _select_candidates_from_content(content: str, *, limit: int = 5, source_type: str | None = None) -> list[dict[str, Any]]:
+    return [_serializable_record(item) for item in match_pdf_records(content, limit=limit, source_type=source_type)]
 
 
 def _select_record_from_pending(pending_payload: dict[str, Any], content: str) -> dict[str, Any] | None:
@@ -98,6 +112,27 @@ def _select_record_from_pending(pending_payload: dict[str, Any], content: str) -
     return resolve_record_by_index(candidates, index)
 
 
+def _kb_candidate_not_found_result(
+    *,
+    route_detail: str,
+    reason_code: str,
+    clarify_reason: str,
+    stop_detail: str,
+) -> dict[str, Any]:
+    return _build_result(
+        reply="我还没有匹配到明确的知识库文件。你可以直接告诉我文件名，或者给我更具体的关键词。",
+        route_code="knowledge_base",
+        route_detail=route_detail,
+        reasons=[reason_code, "candidate_not_found"],
+        selected_target=build_selected_target("knowledge_base", None, None, clear_reason=clarify_reason),
+        reply_type="clarify",
+        stop_code="clarify_waiting_user",
+        stop_detail=stop_detail,
+        clarify_needed=True,
+        clarify_reason=clarify_reason,
+    )
+
+
 def handle_pending_knowledge_base_action(session_id: str, request_id: str, content: str) -> dict[str, Any] | None:
     pending = latest_pending_action(session_id)
     if not pending:
@@ -105,6 +140,158 @@ def handle_pending_knowledge_base_action(session_id: str, request_id: str, conte
 
     action_type = str(pending["action_type"])
     payload = dict(pending["payload"])
+
+    if action_type == "kb_list_scope":
+        if not is_kb_list_followup_request(content):
+            return None
+        resolve_pending_action(pending["id"])
+        scope = str(payload.get("scope") or "all")
+        records = list_pdf_records(source_type="upload" if scope == "upload" else None)
+        scope_label = "你上传并纳入知识库的文件" if scope == "upload" else "知识库"
+        return _build_result(
+            reply=build_kb_list_reply(records, show_all=True, scope_label=scope_label),
+            route_code="knowledge_base",
+            route_detail="list_files_full",
+            reasons=["knowledge_base_list_followup", "full_list_requested"],
+            selected_target=build_selected_target("knowledge_base", None, f"{len(records)} files"),
+            reply_type="kb_list",
+            stop_code="knowledge_base_list_returned",
+            stop_detail="list_files_full",
+        )
+
+    if action_type == "kb_rename_candidates":
+        selected = _select_record_from_pending(payload, content)
+        if not selected:
+            return None
+        resolve_pending_action(pending["id"])
+        if not can_rename_record(selected):
+            return _build_result(
+                reply=build_rename_unsupported_reply(selected["file_name"]),
+                route_code="knowledge_base",
+                route_detail="rename_unsupported",
+                reasons=["pending_rename_selection_resolved", "base_material_selected"],
+                selected_target=build_selected_target("knowledge_base_file", selected["stored_path"], selected["file_name"]),
+                reply_type="kb_rename_unsupported",
+                stop_code="knowledge_base_rename_unsupported",
+                stop_detail="rename_only_supported_for_uploads",
+            )
+
+        new_file_name = str(payload.get("new_file_name") or "").strip()
+        if not new_file_name:
+            save_pending_action(session_id, "kb_rename_new_name", {"selected": selected}, request_id=request_id)
+            return _build_result(
+                reply=build_rename_new_name_reply(selected["file_name"]),
+                route_code="knowledge_base",
+                route_detail="rename_new_name_clarify",
+                reasons=["pending_rename_selection_resolved", "new_name_missing"],
+                selected_target=build_selected_target("knowledge_base_file", selected["stored_path"], selected["file_name"]),
+                reply_type="clarify",
+                stop_code="clarify_waiting_user",
+                stop_detail="rename_new_name_needed",
+                clarify_needed=True,
+                clarify_reason="need_new_file_name",
+            )
+
+        save_pending_action(
+            session_id,
+            "kb_rename_confirm",
+            {"selected": selected, "new_file_name": new_file_name},
+            request_id=request_id,
+        )
+        return _build_result(
+            reply=build_rename_confirm_reply(selected["file_name"], new_file_name),
+            route_code="knowledge_base",
+            route_detail="rename_confirm",
+            reasons=["pending_rename_selection_resolved", "new_name_provided"],
+            selected_target=build_selected_target("knowledge_base_file", selected["stored_path"], selected["file_name"]),
+            reply_type="clarify",
+            stop_code="clarify_waiting_user",
+            stop_detail="rename_confirmation_needed",
+            clarify_needed=True,
+            clarify_reason="need_rename_confirmation",
+        )
+
+    if action_type == "kb_rename_new_name":
+        selected = dict(payload.get("selected") or {})
+        if not selected:
+            resolve_pending_action(pending["id"])
+            return None
+
+        new_file_name = parse_new_file_name(content)
+        if not new_file_name:
+            return _build_result(
+                reply=build_rename_new_name_reply(selected["file_name"]),
+                route_code="knowledge_base",
+                route_detail="rename_new_name_clarify",
+                reasons=["pending_rename_new_name_still_waiting"],
+                selected_target=build_selected_target("knowledge_base_file", selected["stored_path"], selected["file_name"]),
+                reply_type="clarify",
+                stop_code="clarify_waiting_user",
+                stop_detail="rename_new_name_needed",
+                clarify_needed=True,
+                clarify_reason="need_new_file_name",
+            )
+
+        resolve_pending_action(pending["id"])
+        save_pending_action(
+            session_id,
+            "kb_rename_confirm",
+            {"selected": selected, "new_file_name": new_file_name},
+            request_id=request_id,
+        )
+        return _build_result(
+            reply=build_rename_confirm_reply(selected["file_name"], new_file_name),
+            route_code="knowledge_base",
+            route_detail="rename_confirm",
+            reasons=["pending_rename_new_name_resolved"],
+            selected_target=build_selected_target("knowledge_base_file", selected["stored_path"], selected["file_name"]),
+            reply_type="clarify",
+            stop_code="clarify_waiting_user",
+            stop_detail="rename_confirmation_needed",
+            clarify_needed=True,
+            clarify_reason="need_rename_confirmation",
+        )
+
+    if action_type == "kb_rename_confirm":
+        selected = dict(payload.get("selected") or {})
+        new_file_name = str(payload.get("new_file_name") or "").strip()
+        if not selected or not new_file_name:
+            resolve_pending_action(pending["id"])
+            return None
+        if not ("确认改名" in content or is_affirmative(content)):
+            return _build_result(
+                reply=build_rename_confirm_reply(selected["file_name"], new_file_name),
+                route_code="knowledge_base",
+                route_detail="rename_confirm",
+                reasons=["pending_rename_confirmation_still_waiting"],
+                selected_target=build_selected_target("knowledge_base_file", selected["stored_path"], selected["file_name"]),
+                reply_type="clarify",
+                stop_code="clarify_waiting_user",
+                stop_detail="rename_confirmation_needed",
+                clarify_needed=True,
+                clarify_reason="need_rename_confirmation",
+            )
+        resolve_pending_action(pending["id"])
+        rename_result = rename_record(selected, new_file_name)
+        update_uploaded_file_reference(
+            rename_result["old_stored_path"],
+            rename_result["new_file_name"],
+            rename_result["new_stored_path"],
+        )
+        return _build_result(
+            reply=f"已把 `{rename_result['old_file_name']}` 改名为 `{rename_result['new_file_name']}`。",
+            route_code="knowledge_base",
+            route_detail="rename_file",
+            reasons=["pending_rename_confirmed"],
+            selected_target=build_selected_target(
+                "knowledge_base_file",
+                rename_result["new_stored_path"],
+                rename_result["new_file_name"],
+            ),
+            reply_type="kb_rename_done",
+            stop_code="knowledge_base_file_renamed",
+            stop_detail="rename_completed",
+        )
 
     if action_type == "kb_export_candidates":
         selected = _select_record_from_pending(payload, content)
@@ -379,17 +566,64 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
     if pending_result:
         return pending_result
 
+    if is_kb_list_followup_request(content):
+        latest_route = latest_route_selection(session_id)
+        route_code = str((latest_route or {}).get("route_selected", {}).get("code") or "")
+        route_detail = str((latest_route or {}).get("route_selected", {}).get("detail") or "")
+        if route_code == "knowledge_base" and route_detail in {"list_files", "list_uploaded_files"}:
+            source_type = "upload" if route_detail == "list_uploaded_files" else None
+            records = list_pdf_records(source_type=source_type)
+            scope_label = "你上传并纳入知识库的文件" if source_type == "upload" else "知识库"
+            return _build_result(
+                reply=build_kb_list_reply(records, show_all=True, scope_label=scope_label),
+                route_code="knowledge_base",
+                route_detail=f"{route_detail}_followup_full",
+                reasons=["knowledge_base_list_followup", "full_list_requested"],
+                selected_target=build_selected_target("knowledge_base", None, f"{len(records)} files"),
+                reply_type="kb_list",
+                stop_code="knowledge_base_list_returned",
+                stop_detail="list_files_full_followup",
+            )
+
     if is_kb_list_request(content):
+        show_all = wants_full_list(content)
         records = list_pdf_records()
+        if records and not show_all and len(records) > 10:
+            save_pending_action(session_id, "kb_list_scope", {"scope": "all"}, request_id=request_id)
         return _build_result(
-            reply=build_kb_list_reply(records, show_only_count=wants_brief_answer(content)),
+            reply=build_kb_list_reply(
+                records,
+                show_only_count=wants_brief_answer(content),
+                show_all=show_all,
+            ),
             route_code="knowledge_base",
-            route_detail="list_files",
-            reasons=["knowledge_base_list_request"],
+            route_detail="list_files_full" if show_all else "list_files",
+            reasons=["knowledge_base_list_request", "full_list_requested" if show_all else "default_list_limit"],
             selected_target=build_selected_target("knowledge_base", None, f"{len(records)} files"),
             reply_type="kb_list",
             stop_code="knowledge_base_list_returned",
-            stop_detail="list_files",
+            stop_detail="list_files_full" if show_all else "list_files",
+        )
+
+    if is_uploaded_file_list_request(content):
+        records = list_pdf_records(source_type="upload")
+        show_all = wants_full_list(content)
+        if records and not show_all and len(records) > 10:
+            save_pending_action(session_id, "kb_list_scope", {"scope": "upload"}, request_id=request_id)
+        return _build_result(
+            reply=build_kb_list_reply(
+                records,
+                show_only_count=wants_brief_answer(content),
+                show_all=show_all,
+                scope_label="你上传并纳入知识库的文件",
+            ),
+            route_code="knowledge_base",
+            route_detail="list_uploaded_files_full" if show_all else "list_uploaded_files",
+            reasons=["uploaded_file_list_request", "full_list_requested" if show_all else "default_list_limit"],
+            selected_target=build_selected_target("knowledge_base", None, f"{len(records)} upload files"),
+            reply_type="kb_list",
+            stop_code="knowledge_base_list_returned",
+            stop_detail="list_uploaded_files_full" if show_all else "list_uploaded_files",
         )
 
     if asks_recent_uploaded_file(content) or asks_upload_label(content):
@@ -414,17 +648,11 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
     if is_export_request(content):
         candidates = _select_candidates_from_content(content, limit=5)
         if not candidates:
-            return _build_result(
-                reply="我还没有匹配到明确的知识库文件。你可以直接告诉我文件名，或者给我更具体的关键词。",
-                route_code="knowledge_base",
+            return _kb_candidate_not_found_result(
                 route_detail="export_candidate_not_found",
-                reasons=["knowledge_base_export_request", "candidate_not_found"],
-                selected_target=build_selected_target("knowledge_base", None, None, clear_reason="no_export_candidate"),
-                reply_type="clarify",
-                stop_code="clarify_waiting_user",
-                stop_detail="need_export_candidate",
-                clarify_needed=True,
+                reason_code="knowledge_base_export_request",
                 clarify_reason="need_export_candidate",
+                stop_detail="need_export_candidate",
             )
 
         selected = candidates[0] if len(candidates) == 1 else None
@@ -478,17 +706,11 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
     if is_delete_request(content):
         candidates = _select_candidates_from_content(content, limit=5)
         if not candidates:
-            return _build_result(
-                reply="我还没有匹配到明确的知识库文件。你可以直接告诉我文件名，或者给我更具体的关键词。",
-                route_code="knowledge_base",
+            return _kb_candidate_not_found_result(
                 route_detail="delete_candidate_not_found",
-                reasons=["knowledge_base_delete_request", "candidate_not_found"],
-                selected_target=build_selected_target("knowledge_base", None, None, clear_reason="no_delete_candidate"),
-                reply_type="clarify",
-                stop_code="clarify_waiting_user",
-                stop_detail="need_delete_candidate",
-                clarify_needed=True,
+                reason_code="knowledge_base_delete_request",
                 clarify_reason="need_delete_candidate",
+                stop_detail="need_delete_candidate",
             )
 
         selected = candidates[0] if len(candidates) == 1 else None
@@ -571,6 +793,90 @@ def handle_knowledge_base_request(session_id: str, request_id: str, content: str
             stop_detail="related_candidates_ready",
             clarify_needed=True,
             clarify_reason="need_candidate_selection",
+        )
+
+    if is_rename_request(content):
+        candidates = _select_candidates_from_content(content, limit=5)
+        new_file_name = parse_new_file_name(content)
+        if not candidates:
+            return _build_result(
+                reply=build_rename_intro_reply(),
+                route_code="knowledge_base",
+                route_detail="rename_intro",
+                reasons=["knowledge_base_rename_request", "candidate_not_found"],
+                selected_target=build_selected_target("knowledge_base", None, None, clear_reason="rename_target_missing"),
+                reply_type="clarify",
+                stop_code="clarify_waiting_user",
+                stop_detail="rename_target_needed",
+                clarify_needed=True,
+                clarify_reason="need_rename_target_and_name",
+            )
+
+        selected = candidates[0] if len(candidates) == 1 else None
+        if selected and not can_rename_record(selected):
+            return _build_result(
+                reply=build_rename_unsupported_reply(selected["file_name"]),
+                route_code="knowledge_base",
+                route_detail="rename_unsupported",
+                reasons=["knowledge_base_rename_request", "base_material_selected"],
+                selected_target=build_selected_target("knowledge_base_file", selected["stored_path"], selected["file_name"]),
+                reply_type="kb_rename_unsupported",
+                stop_code="knowledge_base_rename_unsupported",
+                stop_detail="rename_only_supported_for_uploads",
+            )
+
+        if selected and new_file_name:
+            save_pending_action(
+                session_id,
+                "kb_rename_confirm",
+                {"selected": selected, "new_file_name": new_file_name},
+                request_id=request_id,
+            )
+            return _build_result(
+                reply=build_rename_confirm_reply(selected["file_name"], new_file_name),
+                route_code="knowledge_base",
+                route_detail="rename_confirm",
+                reasons=["knowledge_base_rename_request", "single_candidate", "new_name_provided"],
+                selected_target=build_selected_target("knowledge_base_file", selected["stored_path"], selected["file_name"]),
+                reply_type="clarify",
+                stop_code="clarify_waiting_user",
+                stop_detail="rename_confirmation_needed",
+                clarify_needed=True,
+                clarify_reason="need_rename_confirmation",
+            )
+
+        if selected:
+            save_pending_action(session_id, "kb_rename_new_name", {"selected": selected}, request_id=request_id)
+            return _build_result(
+                reply=build_rename_new_name_reply(selected["file_name"]),
+                route_code="knowledge_base",
+                route_detail="rename_new_name_clarify",
+                reasons=["knowledge_base_rename_request", "single_candidate", "new_name_missing"],
+                selected_target=build_selected_target("knowledge_base_file", selected["stored_path"], selected["file_name"]),
+                reply_type="clarify",
+                stop_code="clarify_waiting_user",
+                stop_detail="rename_new_name_needed",
+                clarify_needed=True,
+                clarify_reason="need_new_file_name",
+            )
+
+        save_pending_action(
+            session_id,
+            "kb_rename_candidates",
+            {"candidates": candidates[:3], "new_file_name": new_file_name},
+            request_id=request_id,
+        )
+        return _build_result(
+            reply=build_rename_candidates_reply(candidates[:3]),
+            route_code="knowledge_base",
+            route_detail="rename_candidates",
+            reasons=["knowledge_base_rename_request", "multiple_candidates"],
+            selected_target=build_selected_target("knowledge_base", None, candidates[0]["file_name"]),
+            reply_type="clarify",
+            stop_code="clarify_waiting_user",
+            stop_detail="rename_candidate_selection_needed",
+            clarify_needed=True,
+            clarify_reason="need_rename_target_selection",
         )
 
     return None
