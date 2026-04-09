@@ -47,8 +47,15 @@ wecom-aibot/
     entry/                     # entry
     flow/                      # flow
     policy/                    # policy
+      routing.py
+      document.py
+      rag.py
+      chat.py
+      upload.py
     state/                     # state
     caps/                      # caps
+      documents.py
+      knowledge_base.py
     runtime/                   # runtime
     tools/                     # tools
 

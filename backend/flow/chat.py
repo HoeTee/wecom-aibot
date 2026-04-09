@@ -1,34 +1,29 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from backend.agent import Agent
-from backend.policy.routing import (
-    build_route_payload,
-    build_selected_target,
-    is_fresh_document_request,
-    maybe_short_circuit_upload_followup,
+from backend.caps.documents import load_system_prompt
+from backend.policy.chat import (
+    build_doc_binding_updated_payload,
+    build_memory_loaded_payload,
+    build_reply_generated_payload,
+    build_request_received_payload,
+    build_runtime_ready_payload,
+    build_stop_reason_payload,
+    select_chat_route,
 )
+from backend.policy.routing import maybe_short_circuit_upload_followup
 from backend.runtime import MCPHost, load_mcp_server_configs_from_env
 from backend.state.store import (
     build_session_id,
-    extract_doc_binding,
     generate_request_id,
     load_memory_context,
+    persist_doc_binding_from_tool_result,
     save_flow_event,
     save_tool_call,
     save_turn,
-    upsert_session_doc,
 )
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SYSTEM_PROMPT_PATH = PROJECT_ROOT / "prompts" / "system" / "assistant_v1.md"
-
-
-def load_system_prompt() -> str:
-    return DEFAULT_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 
 async def run_chat(payload: dict[str, Any]) -> str:
@@ -47,7 +42,7 @@ async def run_chat(payload: dict[str, Any]) -> str:
     emit_flow(
         "entry",
         "request_received",
-        {"message_type": "text", "content_preview": content[:200]},
+        build_request_received_payload("text", content_preview=content[:200]),
     )
 
     short_circuit = maybe_short_circuit_upload_followup(session_id, content)
@@ -59,66 +54,45 @@ async def run_chat(payload: dict[str, Any]) -> str:
         emit_flow(
             "entry",
             "reply_generated",
-            {"reply_type": "ack_existing_upload", "reply_preview": reply[:200]},
+            build_reply_generated_payload("ack_existing_upload", reply),
         )
         emit_flow(
             "flow",
             "stop_reason",
-            {"code": "short_circuit", "detail": "upload_followup_confirmation", "layer": "flow"},
+            build_stop_reason_payload("short_circuit", "upload_followup_confirmation"),
         )
         return reply
 
-    include_bound_doc = not is_fresh_document_request(content)
-    route_detail = "fresh_document_request" if not include_bound_doc else "default_agent_flow"
-    route_reason = ["fresh_document_request"] if not include_bound_doc else ["default_text_message"]
+    include_bound_doc, route_payload = select_chat_route(content)
     emit_flow(
         "flow",
         "route_selected",
-        build_route_payload(
-            route_code="agent_chat",
-            route_detail=route_detail,
-            reasons=route_reason,
-            selected_target=build_selected_target(
-                "document" if include_bound_doc else "none",
-                None,
-                None,
-                clear_reason="fresh_document_request" if not include_bound_doc else "no_target_selected_at_route_time",
-            ),
-            clarify_needed=False,
-        ),
+        route_payload,
     )
 
     memory_context = load_memory_context(session_id, include_bound_doc=include_bound_doc)
     emit_flow(
         "state",
         "memory_loaded",
-        {"include_bound_doc": include_bound_doc, "has_memory_context": bool(memory_context)},
+        build_memory_loaded_payload(include_bound_doc, bool(memory_context)),
     )
 
     def on_tool_result(tool_name: str, args_dict: dict[str, Any], result_text: str) -> None:
         save_tool_call(session_id, tool_name, args_dict, result_text, request_id=request_id)
-        binding = extract_doc_binding(tool_name, args_dict, result_text)
+        binding = persist_doc_binding_from_tool_result(
+            session_id=session_id,
+            request_id=request_id,
+            tool_name=tool_name,
+            args_dict=args_dict,
+            result_text=result_text,
+            last_user_text=content,
+        )
         if not binding:
             return
-        upsert_session_doc(
-            session_id=session_id,
-            doc_id=str(binding["doc_id"] or ""),
-            doc_url=binding["doc_url"],
-            doc_name=binding["doc_name"],
-            last_tool_name=tool_name,
-            last_user_text=content,
-            request_id=request_id,
-        )
         emit_flow(
             "state",
             "doc_binding_updated",
-            {
-                "selected_target": build_selected_target(
-                    "document",
-                    str(binding["doc_id"] or ""),
-                    binding["doc_name"] or binding["doc_url"] or "",
-                ),
-            },
+            build_doc_binding_updated_payload(binding),
         )
 
     try:
@@ -131,7 +105,7 @@ async def run_chat(payload: dict[str, Any]) -> str:
             emit_flow(
                 "runtime",
                 "tool_runtime_ready",
-                {"tool_count": len(mcp_runtime.tools), "server_count": len(server_configs)},
+                build_runtime_ready_payload(len(mcp_runtime.tools), len(server_configs)),
             )
 
         agent = Agent(
@@ -148,7 +122,7 @@ async def run_chat(payload: dict[str, Any]) -> str:
         emit_flow(
             "entry",
             "reply_generated",
-            {"reply_type": "assistant_final", "reply_preview": reply[:200]},
+            build_reply_generated_payload("assistant_final", reply),
         )
         return reply
     finally:

@@ -9,7 +9,6 @@ from werkzeug.utils import secure_filename
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 KNOWLEDGE_BASE_PAPER_DIR = PROJECT_ROOT / "knowledge_base" / "papers"
 KNOWLEDGE_BASE_UPLOAD_DIR = KNOWLEDGE_BASE_PAPER_DIR / "uploads"
-PDF_HEADER = b"%PDF-"
 
 
 def sha256_bytes(content: bytes) -> str:
@@ -77,15 +76,3 @@ def store_pdf_in_knowledge_base(file_bytes: bytes, original_name: str) -> dict[s
         "matched_file_name": target_path.name if action == "replaced" else None,
         "matched_stored_path": relative_project_path(target_path) if action == "replaced" else None,
     }
-
-
-def build_upload_reply(file_name: str, action: str, matched_file_name: str | None = None) -> str:
-    if action == "unchanged":
-        return f"PDF `{file_name}` 已经在知识库里了，文件名和内容都重复，未再次写入。"
-    if action == "duplicate_content":
-        if matched_file_name:
-            return f"PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，未重复加入知识库。"
-        return f"PDF `{file_name}` 与知识库中的现有文件内容完全一致，未重复加入知识库。"
-    if action == "replaced":
-        return f"检测到同名 PDF `{file_name}` 已存在，已用新上传内容更新知识库中的同名文件。"
-    return f"PDF `{file_name}` 已加入知识库。后续检索会自动纳入它。"

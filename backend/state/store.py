@@ -251,6 +251,30 @@ def extract_doc_binding(tool_name: str, args_dict: dict[str, Any], result_text: 
     }
 
 
+def persist_doc_binding_from_tool_result(
+    session_id: str,
+    request_id: str,
+    tool_name: str,
+    args_dict: dict[str, Any],
+    result_text: str,
+    last_user_text: str,
+) -> dict[str, str | None] | None:
+    binding = extract_doc_binding(tool_name, args_dict, result_text)
+    if not binding:
+        return None
+
+    upsert_session_doc(
+        session_id=session_id,
+        doc_id=str(binding["doc_id"] or ""),
+        doc_url=binding["doc_url"],
+        doc_name=binding["doc_name"],
+        last_tool_name=tool_name,
+        last_user_text=last_user_text,
+        request_id=request_id,
+    )
+    return binding
+
+
 def upsert_session_doc(
     session_id: str,
     doc_id: str,
