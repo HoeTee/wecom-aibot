@@ -50,7 +50,7 @@ You classify a user request for a WeCom document workflow system.
 
 Return JSON only with this shape:
 {
-  "intent_family": "knowledge_base" | "document" | "upload_followup" | "general",
+  "intent_family": "knowledge_base" | "document" | "smartsheet" | "upload_followup" | "general",
   "intent": string,
   "target_ref": string,
   "resolved_from_context": boolean,
@@ -65,10 +65,13 @@ Rules:
 - Do not classify file-management requests as RAG or free-form chat.
 - If the user references an ordinal candidate such as "第4份文件", preserve it in target_ref and set resolved_from_context=true when recent candidates are provided.
 - Requests like "修改一下第4份文件的名字为 harness engineering" should be classified as knowledge_base + kb.rename when recent knowledge-base candidates are provided.
+- If the user asks to create or generate a smart sheet / 智能表格, use intent_family="smartsheet".
+- Requests like "帮我对知识库里的所有文章做一个整理，生成一个智能表格" should be classified as smartsheet + smartsheet.create with params.source_scope="knowledge_base".
 - For rename requests, put the desired new file name in params.new_name when present.
 - If uncertain, still choose the closest family and include missing fields.
 - Allowed knowledge_base intents: kb.list, kb.list_uploads, kb.related, kb.export, kb.rename, kb.delete, kb.unknown
 - Allowed document intents: doc.edit, doc.create, doc.merge_kb, doc.replace_kb, doc.expand_kb, doc.unknown
+- Allowed smartsheet intents: smartsheet.create, smartsheet.update_schema, smartsheet.add_records, smartsheet.unknown
 - Allowed upload_followup intent: upload.followup
 - Allowed general intent: agent.chat
 """
@@ -95,6 +98,7 @@ def _normalize_intent_packet(packet: dict[str, Any], message: str) -> dict[str, 
     intent_family = str(packet.get("intent_family") or "general").strip() or "general"
     intent = str(packet.get("intent") or "agent.chat").strip() or "agent.chat"
     target_ref = str(packet.get("target_ref") or "").strip()
+    message_text = str(message or "").strip()
     try:
         confidence = float(packet.get("confidence") or 0.0)
     except (TypeError, ValueError):
@@ -106,7 +110,16 @@ def _normalize_intent_packet(packet: dict[str, Any], message: str) -> dict[str, 
     if not isinstance(missing, list):
         missing = []
 
-    if intent_family not in {"knowledge_base", "document", "upload_followup", "general"}:
+    if (
+        ("智能表格" in message_text or "smartsheet" in message_text.lower())
+        and intent_family in {"knowledge_base", "document", "general"}
+        and intent in {"kb.list", "kb.unknown", "doc.create", "doc.unknown", "agent.chat"}
+    ):
+        intent_family = "smartsheet"
+        intent = "smartsheet.create"
+        params.setdefault("source_scope", "knowledge_base" if "知识库" in message_text else "manual")
+
+    if intent_family not in {"knowledge_base", "document", "smartsheet", "upload_followup", "general"}:
         intent_family = "general"
     if intent_family == "general" and intent == "agent.chat":
         pass
@@ -114,6 +127,8 @@ def _normalize_intent_packet(packet: dict[str, Any], message: str) -> dict[str, 
         intent = "kb.unknown"
     elif intent_family == "document" and not intent.startswith("doc."):
         intent = "doc.unknown"
+    elif intent_family == "smartsheet" and not intent.startswith("smartsheet."):
+        intent = "smartsheet.unknown"
     elif intent_family == "upload_followup" and intent != "upload.followup":
         intent = "upload.followup"
 
@@ -199,6 +214,7 @@ class Agent:
         settings: Settings | None = None,
         debug: bool = False,
         memory_context: str = "",
+        intent_packet: dict[str, Any] | None = None,
         on_tool_result: Callable[[str, dict[str, Any], str], None] | None = None,
         on_flow_event: FlowCallback | None = None,
     ) -> None:
@@ -215,6 +231,7 @@ class Agent:
         self.max_tool_calls = self.settings.max_tool_calls
         self.max_context_tokens = self.settings.max_context_tokens
         self.max_result_tokens = self.settings.max_result_tokens
+        self.intent_packet = dict(intent_packet or {})
         self.on_tool_result = on_tool_result
         self.on_flow_event = on_flow_event
 
@@ -307,6 +324,8 @@ class Agent:
         params_ok = True
         need_confirm = False
         risk = "low"
+        intent_family = str(self.intent_packet.get("intent_family") or "").strip()
+        intent = str(self.intent_packet.get("intent") or "").strip()
 
         for tool_call in tool_calls:
             function_name = tool_call.function.name
@@ -342,12 +361,30 @@ class Agent:
                 target_ok = False
                 problems.append(f"{function_name}:missing_doc_id")
 
+        lowered_tool_names = [name.lower() for name in tool_names]
+        sequence_ok = len(tool_calls) <= self.max_tool_calls
+        if intent_family == "smartsheet":
+            if any(name.endswith("llamaindex_rag_query") for name in lowered_tool_names):
+                params_ok = False
+                risk = "high"
+                problems.append("smartsheet_intent:routing_to_rag_forbidden")
+            if lowered_tool_names and not any(
+                ("create_doc" in name or "smartsheet_" in name) for name in lowered_tool_names
+            ):
+                sequence_ok = False
+                problems.append("smartsheet_intent:tool_family_mismatch")
+        elif intent_family == "knowledge_base" and intent in {"kb.rename", "kb.delete", "kb.export"}:
+            if any(name.endswith("llamaindex_rag_query") for name in lowered_tool_names):
+                params_ok = False
+                risk = "high"
+                problems.append("knowledge_base_file_management:routing_to_rag_forbidden")
+
         return {
             "tool_names": tool_names,
             "tool_count": len(tool_calls),
             "target_ok": target_ok,
             "params_ok": params_ok,
-            "sequence_ok": len(tool_calls) <= self.max_tool_calls,
+            "sequence_ok": sequence_ok,
             "need_confirm": need_confirm,
             "risk": risk,
             "problems": problems,

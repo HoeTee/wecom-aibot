@@ -319,3 +319,16 @@ python scripts/cleanup_artifacts.py
 ## 当前边界
 
 这套 gates 目前只针对已明确建模的场景生效，不自动推广到所有问题。
+
+## 当前新增场景
+
+已新增智能表格回归场景：
+
+- `smartsheet_create_from_kb`
+
+它主要检查：
+
+- 智能表格请求必须进入 `smartsheet` 路由
+- 不得退化成知识库列表
+- 不得错误调用 `rag.*`
+- 如果企业微信文档授权过期，必须快速失败并明确提示

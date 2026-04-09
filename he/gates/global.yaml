@@ -25,3 +25,5 @@ gates:
 
   - id: tool_execution_must_end_with_reply_or_explicit_error
     description: tool 执行后必须产生 reply，或产生显式 stop_reason，不能静默挂住。
+  - id: smartsheet_intent_must_not_call_rag
+    description: 智能表格意图必须留在 `smartsheet.*` / 企业微信表格工具边界内，不得掉入 `rag.*`。

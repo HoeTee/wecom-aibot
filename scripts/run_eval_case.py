@@ -700,6 +700,19 @@ def evaluate_global_gate(
             return True, f"tool 调用后以显式 stop_reason 结束：{stop_code}"
         return False, "tool 调用后既没有 assistant reply，也没有显式 stop_reason。"
 
+    if gate_id == "smartsheet_intent_must_not_call_rag":
+        intent_family = str(intent_packet.get("intent_family") or "").strip()
+        if intent_family != "smartsheet":
+            return True, "当前请求不属于智能表格意图。"
+        rag_tools = [
+            name
+            for name in {*(tool_names or []), *(requested_tools or [])}
+            if str(name).endswith("llamaindex_rag_query")
+        ]
+        if rag_tools:
+            return False, f"智能表格意图错误调用了 RAG：{rag_tools}"
+        return True, "智能表格意图没有掉入 RAG。"
+
     return True, f"未实现的 global gate，默认跳过：{gate_id}"
 
 
@@ -868,6 +881,34 @@ def evaluate_scenario_gate(
         if any(token in assistant_reply for token in ("确认改名", "改名为", "harness engineering")):
             return True, "序号引用改名已准备确认。"
         return False, "序号引用改名没有给出明确确认。"
+
+    if gate_id == "smartsheet_request_must_not_fall_back_to_kb_list":
+        if "智能表格" not in user_request and "smartsheet" not in user_request.lower():
+            return True, "当前请求不属于智能表格。"
+        if route_selected.get("code") != "smartsheet":
+            return False, "智能表格请求没有进入 smartsheet 路由。"
+        if route_selected.get("detail") in {"list_files", "list_files_full", "list_uploaded_files"}:
+            return False, "智能表格请求错误退化成了知识库列表。"
+        list_lines = [line for line in assistant_reply.splitlines() if re.match(r"^\d+\.\s", line.strip())]
+        if list_lines and "智能表格" not in assistant_reply:
+            return False, "智能表格请求只返回了文件列表，没有进入表格创建语义。"
+        return True, "智能表格请求没有退化成知识库列表。"
+
+    if gate_id == "smartsheet_auth_expired_must_fail_fast":
+        if "智能表格" not in user_request and "smartsheet" not in user_request.lower():
+            return True, "当前请求不属于智能表格。"
+        auth_fail = any(
+            token in str(row["result_excerpt"]).lower()
+            for row in tool_calls
+            for token in ("authorization expired", '"errcode": 850003', "'errcode': 850003")
+        )
+        if not auth_fail:
+            return True, "当前未检测到智能表格授权过期。"
+        if route_selected.get("code") != "smartsheet":
+            return False, "授权过期时没有留在 smartsheet 路由内快速失败。"
+        if any(token in assistant_reply.lower() for token in ("authorization expired", "授权")):
+            return True, "智能表格授权过期时已快速失败并明确提示。"
+        return False, "智能表格授权过期时没有明确提示授权问题。"
 
     if gate_id == "doc_merge_must_confirm_target_source_action":
         required_tokens = ("目标文档", "来源文档", "动作")

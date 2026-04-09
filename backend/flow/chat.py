@@ -7,6 +7,7 @@ from backend.agent import Agent, Settings, classify_intent_packet
 from backend.caps.documents import load_system_prompt
 from backend.flow.document_ops import handle_document_operation_request
 from backend.flow.knowledge_base import handle_knowledge_base_request
+from backend.flow.smartsheet import handle_smartsheet_request
 from backend.policy.chat import (
     build_doc_binding_updated_payload,
     build_memory_loaded_payload,
@@ -47,6 +48,21 @@ def _build_routing_context(session_id: str) -> str:
     return "\n".join(lines)
 
 
+def _summarize_args(args_dict: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key, value in args_dict.items():
+        if key == "content":
+            text = str(value or "").strip()
+            summary["content_preview"] = text[:200]
+            summary["content_length"] = len(text)
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            summary[key] = value
+        else:
+            summary[key] = str(value)[:200]
+    return summary
+
+
 async def run_chat(payload: dict[str, Any]) -> ChatResult:
     mcp_runtime: MCPHost | None = None
     content = str(payload.get("content", "")).strip()
@@ -71,6 +87,38 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
     def finalize_direct(result: dict[str, Any]) -> ChatResult:
         reply = str(result["reply"])
         save_user_turn_once(content)
+        for tool_call in result.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            tool_name = str(tool_call.get("tool_name") or "").strip()
+            args_dict = dict(tool_call.get("args_dict") or {})
+            result_text = str(tool_call.get("result_text") or "")
+            if not tool_name:
+                continue
+            save_tool_call(session_id, tool_name, args_dict, result_text, request_id=request_id)
+            emit_flow(
+                "runtime",
+                "tool_called",
+                {
+                    "tool_name": tool_name,
+                    "args_summary": _summarize_args(args_dict),
+                    "result_summary": result_text[:300],
+                    "result_status": "failure"
+                    if any(token in result_text.lower() for token in ("error", "failed", "traceback", "authorization expired"))
+                    or ('"errcode":' in result_text and '"errcode": 0' not in result_text)
+                    else "success",
+                },
+            )
+            binding = persist_doc_binding_from_tool_result(
+                session_id=session_id,
+                request_id=request_id,
+                tool_name=tool_name,
+                args_dict=args_dict,
+                result_text=result_text,
+                last_user_text=content,
+            )
+            if binding:
+                emit_flow("state", "doc_binding_updated", build_doc_binding_updated_payload(binding))
         save_turn(session_id, "assistant", reply, request_id=request_id)
         emit_flow("flow", "route_selected", dict(result["route_payload"]))
         emit_flow("entry", "reply_generated", build_reply_generated_payload(str(result["reply_type"]), reply))
@@ -106,7 +154,13 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
         )
         return mcp_runtime
 
-    async def run_agent_flow(user_text: str, *, include_bound_doc: bool, route_payload: dict[str, Any]) -> ChatResult:
+    async def run_agent_flow(
+        user_text: str,
+        *,
+        include_bound_doc: bool,
+        route_payload: dict[str, Any],
+        intent_packet: dict[str, Any] | None = None,
+    ) -> ChatResult:
         runtime = await ensure_runtime()
         memory_context = load_memory_context(session_id, include_bound_doc=include_bound_doc)
         emit_flow("flow", "route_selected", route_payload)
@@ -132,6 +186,7 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
             system_prompt=load_system_prompt(),
             mcp_client=runtime,
             memory_context=memory_context,
+            intent_packet=intent_packet,
             on_tool_result=on_tool_result,
             on_flow_event=lambda event_name, event_payload: emit_flow("flow", event_name, event_payload),
         )
@@ -181,6 +236,18 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
         )
         emit_flow("flow", "intent_packet_created", intent_packet)
 
+        if str(intent_packet.get("intent_family") or "").strip() == "smartsheet":
+            runtime_for_smartsheet = await ensure_runtime()
+            smartsheet_result = await handle_smartsheet_request(
+                session_id,
+                request_id,
+                content,
+                host=runtime_for_smartsheet,
+                intent_hint=intent_packet,
+            )
+            if smartsheet_result:
+                return finalize_direct(smartsheet_result)
+
         if str(intent_packet.get("intent_family") or "").strip() == "knowledge_base":
             kb_result = handle_knowledge_base_request(session_id, request_id, content, intent_hint=intent_packet)
             if kb_result:
@@ -192,7 +259,12 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
                         "delegate_message_prepared",
                         {"delegate_preview": str(delegate_message)[:200]},
                     )
-                    return await run_agent_flow(delegate_message, include_bound_doc=True, route_payload=route_payload)
+                    return await run_agent_flow(
+                        delegate_message,
+                        include_bound_doc=True,
+                        route_payload=route_payload,
+                        intent_packet=intent_packet,
+                    )
                 return finalize_direct(kb_result)
 
         runtime_for_doc_ops = await ensure_runtime()
@@ -211,7 +283,12 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
                     "delegate_message_prepared",
                     {"delegate_preview": str(delegate_message)[:200]},
                 )
-                return await run_agent_flow(delegate_message, include_bound_doc=True, route_payload=route_payload)
+                return await run_agent_flow(
+                    delegate_message,
+                    include_bound_doc=True,
+                    route_payload=route_payload,
+                    intent_packet=intent_packet,
+                )
             return finalize_direct(doc_result)
 
         kb_result = handle_knowledge_base_request(session_id, request_id, content, intent_hint=intent_packet)
@@ -224,11 +301,21 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
                     "delegate_message_prepared",
                     {"delegate_preview": str(delegate_message)[:200]},
                 )
-                return await run_agent_flow(delegate_message, include_bound_doc=True, route_payload=route_payload)
+                return await run_agent_flow(
+                    delegate_message,
+                    include_bound_doc=True,
+                    route_payload=route_payload,
+                    intent_packet=intent_packet,
+                )
             return finalize_direct(kb_result)
 
         include_bound_doc, route_payload = select_chat_route(content)
-        return await run_agent_flow(content, include_bound_doc=include_bound_doc, route_payload=route_payload)
+        return await run_agent_flow(
+            content,
+            include_bound_doc=include_bound_doc,
+            route_payload=route_payload,
+            intent_packet=intent_packet,
+        )
     finally:
         if mcp_runtime:
             await mcp_runtime.cleanup()

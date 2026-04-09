@@ -78,3 +78,23 @@ agent 通过 MCP tools 调用外部能力，而不是直接自由执行本地命
 
 - 可以由 agent 做主路由
 - 但一旦进入该意图家族，就不应再自由掉入 `rag.*`
+
+## 智能表格动作边界
+
+智能表格属于独立动作家族：
+
+- `smartsheet.create`
+- `smartsheet.update_schema`
+- `smartsheet.add_records`
+
+这类动作允许的工具集合应限制在企业微信文档 / 智能表格工具内，例如：
+
+- `wecom_docs__create_doc`
+- `wecom_docs__smartsheet_get_sheet`
+- `wecom_docs__smartsheet_add_sheet`
+- `wecom_docs__smartsheet_add_fields`
+- `wecom_docs__smartsheet_add_records`
+
+这类动作不应自由调用：
+
+- `llamaindex_rag__*`

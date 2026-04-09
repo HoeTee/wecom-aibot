@@ -336,3 +336,25 @@ HE 还要看层与层之间有没有断链。
 `manifest/`、`persist/`、`logs/` 不再作为根目录一级目录参与结构表达。
 
 `he/runs/` 和 `he/reports/` 也属于可清理的运行产物，不属于稳定代码结构。
+
+## 智能表格意图
+
+智能表格不是普通 `document` 或 `knowledge_base` 的别名。
+
+当前架构里应把它视为独立动作家族：
+
+- `intent_family = smartsheet`
+- `intent = smartsheet.create | smartsheet.update_schema | smartsheet.add_records`
+
+对应关系：
+
+- `flow`
+  - 负责把智能表格请求排成：识别意图 -> 权限检查 -> 建表 -> 初始化字段/记录
+- `policy`
+  - 负责限制这类请求不能退化成知识库列表或 `rag.*`
+- `caps`
+  - 定义 `smartsheet.*` 动作
+- `runtime`
+  - 把 `smartsheet.*` 分发到企业微信文档 MCP
+- `tools`
+  - 真正执行 `create_doc(doc_type=10)`、`smartsheet_add_sheet`、`smartsheet_add_fields`、`smartsheet_add_records`

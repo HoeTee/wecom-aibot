@@ -8,6 +8,7 @@ from typing import Any
 from backend.tools.doc_cli import execute_doc_action
 from backend.tools.kb_cli import execute_kb_action
 from backend.tools.rag_cli import execute_rag_action
+from backend.tools.smartsheet_cli import execute_smartsheet_action
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +78,8 @@ async def async_dispatch_cli_action(action: str, **kwargs: Any) -> dict[str, Any
             result = execute_kb_action(action, **kwargs)
         elif action.startswith("doc."):
             result = await execute_doc_action(action, **kwargs)
+        elif action.startswith("smartsheet."):
+            result = await execute_smartsheet_action(action, **kwargs)
         elif action.startswith("rag."):
             result = await execute_rag_action(action, **kwargs)
         else:
