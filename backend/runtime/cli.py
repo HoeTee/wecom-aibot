@@ -30,13 +30,17 @@ if not logger.handlers:
 
 
 def _safe_summary(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     if isinstance(value, (bytes, bytearray)):
         return f"<{len(value)} bytes>"
+    if isinstance(value, Path):
+        return str(value)
     if isinstance(value, dict):
         return {key: _safe_summary(item) for key, item in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple, set)):
         return [_safe_summary(item) for item in value[:5]]
-    return value
+    return f"<{value.__class__.__name__}>"
 
 
 def dispatch_cli_action(action: str, **kwargs: Any) -> dict[str, Any]:
