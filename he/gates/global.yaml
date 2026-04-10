@@ -1,0 +1,29 @@
+gates:
+  - id: required_stdio_mcp_must_initialize
+    description: "所有 `required: true` 的 stdio MCP server 必须先完成 initialize，业务场景才能算有效。"
+
+  - id: must_bind_doc_triple
+    description: 文档操作成功时，如果相关信息可得，必须保留 `doc_id`、`doc_url`、`doc_name` 三元组。
+
+  - id: must_not_claim_success_on_failure
+    description: 如果文档 tool 失败，assistant 不得声称成功。
+
+  - id: must_reuse_existing_doc_on_followup
+    description: 后续编辑默认必须复用已有文档，只有用户明确要求新建时才允许创建新文档。
+
+  - id: must_follow_requested_structure
+    description: 当用户要求特定文档结构时，最终文档必须遵循该结构。
+
+  - id: flow_checks_must_pass
+    description: flow trace 必须包含 route、stop reason，以及 tool 执行前的 agent self-check。
+
+  - id: file_management_intent_must_not_call_rag
+    description: 文件管理意图必须留在 `kb.*` 动作边界内，不得掉入 `rag.*`。
+
+  - id: agent_intent_packet_must_exist_before_tool_selection
+    description: 只要发生 tool selection，就必须先有 agent 产出的结构化 intent packet。
+
+  - id: tool_execution_must_end_with_reply_or_explicit_error
+    description: tool 执行后必须产生 reply，或产生显式 stop_reason，不能静默挂住。
+  - id: smartsheet_intent_must_not_call_rag
+    description: 智能表格意图必须留在 `smartsheet.*` / 企业微信表格工具边界内，不得掉入 `rag.*`。

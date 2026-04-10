@@ -1,0 +1,12 @@
+id: kb_export_action_clarify
+goal: 当用户选择了某篇知识库 PDF 后，系统应继续澄清是要原文件还是摘要，而不是直接假设。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+scenario_gates:
+  - id: kb_export_must_clarify_original_or_summary
+    description: 导出链路必须先澄清原文件还是摘要。
+artifact_focus:
+  - assistant_reply
+  - flow_trace
+  - evaluator

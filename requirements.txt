@@ -3,6 +3,7 @@ mcp
 openai
 pydantic-settings
 python-dotenv
+PyYAML
 llama-index-core
 llama-index-readers-file
 llama-index-llms-openai-like

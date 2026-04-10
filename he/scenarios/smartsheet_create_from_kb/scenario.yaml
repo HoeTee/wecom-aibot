@@ -1,0 +1,18 @@
+id: smartsheet_create_from_kb
+goal: 用户要求基于知识库内容生成智能表格时，系统应进入 smartsheet 动作家族，不得退化成知识库列表或 RAG。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+global_gates:
+  - agent_intent_packet_must_exist_before_tool_selection
+  - tool_execution_must_end_with_reply_or_explicit_error
+  - smartsheet_intent_must_not_call_rag
+scenario_gates:
+  - id: smartsheet_request_must_not_fall_back_to_kb_list
+    description: 智能表格请求不得退化为知识库列表回复。
+  - id: smartsheet_auth_expired_must_fail_fast
+    description: 当企业微信文档授权过期时，智能表格创建应快速失败并明确提示授权问题。
+artifact_focus:
+  - assistant_reply
+  - flow_trace
+  - evaluator

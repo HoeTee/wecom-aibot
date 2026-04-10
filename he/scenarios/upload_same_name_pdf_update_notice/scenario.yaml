@@ -1,0 +1,15 @@
+id: upload_same_name_pdf_update_notice
+goal: 用户上传同名但内容不同的 PDF 时，系统必须明确提示这是同名文件更新，而不是普通新增。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+  - turns/turn_2.txt
+scenario_gates:
+  - id: uploaded_pdf_must_be_recorded
+    description: 同名更新后，session 必须保留最近上传文件状态。
+  - id: same_name_upload_update_must_be_noticed
+    description: 同名但内容不同的上传必须被明确提示为更新，而不是普通新增。
+artifact_focus:
+  - assistant_reply
+  - uploaded_file
+  - gate_results

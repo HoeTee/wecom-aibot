@@ -1,461 +1,692 @@
 # PLAN
 
-## 1. 目标
+## 当前进度
 
-本计划的目标不是把当前仓库改造成“零人工写代码”的系统，而是吸收 OpenAI 在 harness engineering 中真正可迁移的部分，把当前项目从：
+- Phase 1：`kb.*` 动作化已落地
+- Phase 2：`doc.*` 动作化已落地
+- Phase 3：已补 `agent_plan_created` 和 `agent_self_check`
+- Phase 4：已补 `contract_results.json` 和 `flow_results.json`
+- Phase 5：已补 `flow` 文件日志与 `scripts/cleanup_artifacts.py`
 
-- 有完整工作流的多智能体应用
+## 目标
 
-推进为：
+这轮计划的目标不是继续往现有 `flow` 里堆更多流程分支，而是把仓库从“按流程写逻辑”逐步改成“按动作组织能力、按原则约束动作、按 HE 验证动作和流程”。
 
-- 评测驱动、可验证、可回归、可持续纠偏的可靠代理系统
+这轮改造的 north star 是：
 
-本仓库的 north star 定义为：
+`让 agent 主要负责路由和结构化意图判断，让动作成为稳定接口，让 flow 只负责编排，让 HE 先测动作契约再测流程。`
 
-`让合同审查结果可验证、可回溯、可覆盖全部审查项，并且任何改动都可以通过评测证明是否变好。`
+## 背景判断
 
+当前仓库已经完成了三件重要事情：
 
-## 2. 对齐的 OpenAI 实践
+1. 运行时层级已经明确：
+   - `entry`
+   - `flow`
+   - `policy`
+   - `state`
+   - `caps`
+   - `runtime`
+   - `tools`
+2. `he/` 已经从运行时层中独立出来。
+3. 多个真实用户问题已经沉淀成了规则文档和回归场景。
 
-本计划对齐的是 OpenAI 文章中以下几条核心思想，而不是照搬它们的组织方式：
+但当前仓库仍有一个核心问题：
 
-- Repository knowledge is the system of record
-- Agent legibility is the goal
-- Mechanical enforcement beats informal guidance
-- Testing, validation, review, and recovery are part of the harness
-- Entropy must be controlled continuously
+- 运行时逻辑依然偏“按流程组织”
+- 很多业务能力还没有先收敛成稳定动作
+- HE 仍然主要围着高层场景做回归
 
-本计划不会照搬的部分：
+这会导致：
 
-- 不追求零人工代码
-- 不允许自动合并生产级变更
-- 不采用低阻塞 merge gate 哲学
-- 不把 coding-agent 工作流直接等同于合同审查工作流
+- 新需求一来，容易继续往 `flow` 堆 if/else
+- 同一动作在多个流程里重复实现
+- HE 很难先测动作，只能围绕场景补洞
 
+## 基本原则
 
-## 3. 当前状态
+这轮改造遵守以下原则：
 
-当前仓库已经具备良好的骨架：
+1. 文档层是上位约束，不是说明书
+   - `README.md`
+   - `AGENTS.md`
+   - `docs/*.md`
+   共同构成 Source of Record
 
-- 6 阶段工作流
-- Planner / Orchestrator / Reflector / Summarizer 角色分工
-- `pageindex` / `llamaindex` / `evidence` 三种检索模式
-- Web + CLI 双入口
-- 工作流日志、导出链路、结构化 API
+2. 运行时代码只负责实现这些原则
 
-但距离 OpenAI 风格的 harness 还有明显差距：
+3. HE 是外部验证层
+   - 不参与生产依赖
+   - 只负责检查和回归
 
-### 3.1 验证层仍然偏软
+4. agent 负责路由，不负责自由决定所有副作用流程
 
-- 结果可以生成，但没有硬性 verifier 阻断错误结果进入汇总与导出
-- 覆盖率只是报告附录，不是 release gate
-- 反思机制仍然主要依赖 LLM 审核，而非机械校验
+5. policy 和 state 必须形成硬约束
+   - 不能只写进提示词
+   - 必须落进代码
 
-### 3.2 Repo 还不是 agent 的系统记录
+6. 先动作化，再流程化，再场景化
 
-- 缺少根目录 `AGENTS.md`
-- 缺少围绕质量、可靠性、执行计划的稳定知识入口
-- 现有文档可读，但还未形成 progressive disclosure 的知识地图
+7. 保持稳定入口文件名不变
+   - `backend/app.py`
+   - `backend/agent.py`
+   - `backend/memory.py`
+   - `scripts/run_eval_case.py`
+   - `scripts/check_layers.py`
+   - `scripts/mcp_test.py`
+   - `gateway/long_connection.ts`
 
-### 3.3 日志是事后记录，不是可评测 trace
+## 总体结构
 
-- 现在的 workflow log 适合人工复盘
-- 但还不足以支持 trace grading、failure mode 分析、回归对比
+### 原则层
 
-### 3.4 缺少系统级 eval 基线
+```text
+README.md
+AGENTS.md
+docs/
+```
 
-- 目前没有 benchmark 数据集
-- 没有固定指标
-- 没有“改完以后是否真的更好”的可重复运行机制
+职责：
 
-### 3.5 缺少机械化边界约束
+- 定义目标
+- 定义边界
+- 定义路由规则
+- 定义流程原则
+- 定义检查方式
+- 定义 HE 工作方式
 
-- 架构边界主要写在文档中
-- 还没有将依赖方向、输出结构、质量要求写成 hard checks
+### 运行时层
 
-### 3.6 缺少持续垃圾回收
+```text
+backend/
+  entry/
+  flow/
+  policy/
+  state/
+  caps/
+  runtime/
+  tools/
+```
 
-- 没有周期性清理 drift、无效规则、失效文档、劣化模式的机制
+一句话关系：
 
+```text
+entry receives
+flow orchestrates
+policy governs
+state provides
+caps define
+runtime dispatches
+tools execute
+```
 
-## 4. 总体策略
+### HE 层
 
-整体路线定义为：
+```text
+he/
+  docs/
+  gates/
+  scenarios/
+  runs/
+  reports/
+```
 
-`Eval-Driven Reliability Harness`
+职责：
 
-核心思想：
+- 固定规则
+- 固定场景
+- 导出证据
+- 自动检查
+- 汇总报告
 
-1. 先定义质量目标，再改 agent
-2. 先建立 benchmark，再调 prompt / tool / loop
-3. 先让输出可验证，再让结果更“聪明”
-4. 先把规则编码成 grader / verifier / checks，再写进 prompt
-5. 让 repo 内文档、规则、计划、评测成为 agent 可直接读取的系统记录
+## 目标形态：动作化架构
 
+### 当前问题
 
-## 5. 成功标准
+当前更像：
 
-完成本计划的最低成功标准如下：
+```text
+route -> 一段流程代码
+```
 
-- 所有审查项都有结论，`coverage = 100%`
-- 每个问题都有可回溯证据
-- 不允许无证据问题进入最终报告
-- 关键回归指标可重复运行
-- 任意一次改动都可以回答“有没有变好”
-- 质量规则不再只靠 prompt 维持，而是由机械检查保证
+目标改成：
 
-建议追踪的核心指标：
+```text
+route -> 一个动作或动作集合
+flow -> 组合动作
+```
 
-- `coverage`
-- `issue_recall`
-- `evidence_precision`
-- `unsupported_claim_rate`
-- `location_accuracy`
-- `latency_p95`
-- `tokens_per_criterion`
-- `artifact_success_rate`
+### 动作集合
 
+第一批需要成为稳定动作的能力：
 
-## 6. 分阶段改造计划
+#### knowledge base
 
-### Phase 0 - 建立评测基线
+- `kb.list`
+- `kb.list_uploads`
+- `kb.export`
+- `kb.rename`
+- `kb.delete`
+- `kb.match_related`
+
+#### documents
+
+- `doc.read`
+- `doc.write`
+- `doc.append`
+- `doc.replace`
+- `doc.expand`
+
+#### RAG
+
+- `rag.search`
+- `rag.summarize`
+
+### agent 的职责
+
+agent 的职责收敛成两件事：
+
+1. 识别意图
+2. 输出结构化动作计划
+
+目标输出形态类似：
+
+```json
+{
+  "intent": "kb.rename",
+  "target": "linux-part1.pdf",
+  "params": {
+    "new_name": "linux-renamed.pdf"
+  },
+  "confidence": 0.86,
+  "need_confirm": true,
+  "missing": []
+}
+```
+
+### self-check hook
+
+在 agent 给出动作计划后，强制加一层 self-check hook。
+
+这层不是最终裁决，但必须存在。
+
+默认检查：
+
+- 对象是否明确
+- 参数是否齐全
+- 是否需要确认
+- 动作顺序是否合理
+- 是否有明显幻觉
+
+### policy 的职责
+
+policy 负责把规则落成代码约束。
+
+例如：
+
+- 改名只允许 uploads
+- 删除必须确认
+- 缺对象不能执行
+- 缺参数不能执行
+- 高风险动作必须先澄清或确认
+
+### state 的职责
+
+state 提供事实，不决定流程。
+
+重点事实：
+
+- 当前绑定文档
+- 最近上传文件
+- 当前候选对象
+- 最近一次 route
+- flow event
+
+### flow 的职责
+
+flow 不再拥有大量业务细节。
+
+flow 只做：
+
+- 组合动作
+- 决定动作顺序
+- 决定何时停止
+
+flow 决定顺序时遵守这些原则：
+
+1. 先确认对象，再执行动作
+2. 先做无副作用动作，再做有副作用动作
+3. 缺信息时先澄清
+4. 信息充分时直接执行
+
+### caps 的职责
+
+caps 定义稳定动作边界。
+
+它回答的是：
+
+- 系统到底支持哪些动作
+- 每个动作需要什么输入
+- 每个动作返回什么输出
+
+### runtime 的职责
+
+runtime 负责把动作调度到执行层。
+
+当前目标是：
+
+- 对 agent 仍可保留 MCP 边界
+- 在本地实现侧逐步统一到 CLI 风格
+
+也就是：
+
+```text
+agent
+-> flow
+-> caps
+-> runtime
+-> CLI / MCP
+-> tools
+```
+
+### tools 的职责
+
+tools 负责真正执行动作。
+
+它不应该决定：
+
+- 用户意图
+- 高层流程
+- 是否需要确认
+
+## CLI 化策略
+
+### 为什么做 CLI
+
+CLI 化的目的不是为了“看起来高级”，而是为了解决：
+
+- 能力边界不稳定
+- 输入输出不统一
+- 测试难
+- 排错难
+- HE 难先测动作契约
+
+### CLI 的定位
+
+CLI 是稳定动作接口，不是开放 shell。
+
+CLI 的要求：
+
+- 参数化输入
+- JSON 输出
+- 明确返回码
+- 非交互式
+- 副作用明确
+
+### 目标命令形态
+
+```text
+kb list --scope all --json
+kb list --scope uploads --json
+kb export --file xxx.pdf --json
+kb rename --file old.pdf --to new.pdf --json
+kb delete --file old.pdf --confirm --json
+
+doc read --doc-id xxx --json
+doc write --doc-id xxx --input payload.json --json
+doc append --doc-id xxx --input payload.json --json
+doc replace --doc-id xxx --input payload.json --json
+doc expand --doc-id xxx --input payload.json --json
+
+rag search --query "..." --json
+rag summarize --query "..." --json
+```
+
+### CLI 目录落点
+
+目标目录：
+
+```text
+backend/tools/
+  kb_cli.py
+  doc_cli.py
+  rag_cli.py
+
+backend/runtime/
+  cli.py
+  mcp.py
+  logs.py
+```
+
+## HE 改造方向
+
+### 当前问题
+
+当前 HE 已经能做：
+
+- `flow_trace`
+- `layer_checks`
+- stdio MCP preflight
+- 部分场景 evaluator
+
+但仍然偏场景回归。
+
+### 目标
+
+让 HE 分三层：
+
+1. contract check
+2. flow check
+3. scenario check
+
+### 1. contract check
+
+先测动作契约，而不是先测整条用户流程。
+
+例如：
+
+- `kb.list` 输出是否是正确 JSON
+- `kb.rename` 是否在 uploads 上生效、在 base 上拒绝
+- `doc.append` 是否需要明确对象和位置
+
+目标目录：
+
+```text
+he/contracts/
+```
+
+### 2. flow check
+
+测 flow 是否按原则组合动作。
+
+重点检查：
+
+- route 是否正确
+- self-check hook 是否执行
+- 是否在需要时先确认
+- 是否按无副作用 -> 有副作用顺序执行
+
+目标目录：
+
+```text
+he/flows/
+```
+
+### 3. scenario check
+
+保留少量端到端场景，作为最终用户体验验证。
+
+保留原则：
+
+- 代表性强
+- 可重复
+- 覆盖真实失败模式
+
+### HE 的目的
+
+HE 的目的不是“堆更多场景”，而是：
+
+- 先证明动作可靠
+- 再证明 flow 没漂
+- 最后证明真实体验没回归
+
+## 日志改造
+
+### 当前问题
+
+当前日志已有：
+
+- `mcp_client.log`
+- 某些本地 MCP stderr 日志
+- `flow_events`
+
+但仍然缺少：
+
+- 动作级日志
+- CLI 执行日志
+- 明确的 route / action / target 维度
+
+### 目标目录
+
+```text
+data/logs/
+  app/
+  flow/
+  cli/
+  mcp/
+  he/
+```
+
+### 统一日志字段
+
+每次关键动作至少记录：
+
+- `request_id`
+- `session_id`
+- `route`
+- `action`
+- `target`
+- `params_summary`
+- `result_status`
+- `stop_reason`
+
+### flow 日志
+
+记录：
+
+- `route_selected`
+- `route_reason`
+- `self_check_result`
+- `clarify_needed`
+- `stop_reason`
+
+### CLI 日志
+
+记录：
+
+- `command`
+- `args`
+- `exit_code`
+- `stdout_path`
+- `stderr_path`
+
+### MCP 日志
+
+记录：
+
+- `server_name`
+- `transport`
+- `initialize_status`
+- `child_stderr_path`
+
+### HE 日志
+
+记录：
+
+- contract 结果
+- flow 检查结果
+- scenario 结果
+- suggested fix layer
+
+## 代码迁移计划
+
+### Phase 1：把 knowledge base 动作做实
 
 目标：
 
-- 让后续所有改造都能被量化评估
+- 让 KB 相关能力先完全动作化
 
-工作内容：
+包括：
 
-- 新增 `evals/` 目录
-- 建立小规模 benchmark 数据集
-- 定义统一指标和评分规则
-- 提供一键运行评测脚本
-- 对三种检索模式建立初始基线
+- `kb.list`
+- `kb.list_uploads`
+- `kb.export`
+- `kb.rename`
+- `kb.delete`
+- `kb.match_related`
 
-建议新增：
+产物：
 
-- `evals/README.md`
-- `evals/datasets/`
-- `evals/graders/`
-- `scripts/run_evals.py`
-- `docs/QUALITY_SCORE.md`
+- `caps` 收口
+- `runtime` 可调
+- `tools` 具备 CLI 风格入口
+- HE 增加 KB contract checks
 
-验收标准：
-
-- 可以对同一批样本重复跑评测
-- 可以输出模式级比较结果
-- 可以记录每次运行的分数、时延、token 和错误
-
-
-### Phase 1 - 把 repo 改成 agent 可读的 system of record
+### Phase 2：把 document 动作做实
 
 目标：
 
-- 让 agent 从 repo 内就能找到规则、计划和质量标准
+- 让文档操作从“流程逻辑”变成“动作能力”
 
-工作内容：
+包括：
 
-- 在仓库根目录新增 `AGENTS.md`
-- 只把 `AGENTS.md` 作为目录，不作为大而全说明书
-- 重组文档，形成 progressive disclosure
-- 把执行计划、质量规则、可靠性规则纳入 repo
+- `doc.read`
+- `doc.write`
+- `doc.append`
+- `doc.replace`
+- `doc.expand`
 
-建议新增或调整：
+产物：
 
+- 文档高级编辑流程不再主要写死在 `flow`
+- HE 可直接测试文档动作契约
+
+### Phase 3：改造 agent + flow
+
+目标：
+
+- agent 主要负责结构化意图识别
+- flow 主要负责动作顺序
+
+包括：
+
+- route 产出结构化计划
+- 强制 self-check hook
+- policy/state 校验
+- flow 执行计划
+
+### Phase 4：改造 HE
+
+目标：
+
+- 从“主要测场景”升级为“先测动作、再测 flow、最后测场景”
+
+包括：
+
+- `he/contracts`
+- `he/flows`
+- 更新 `scripts/run_eval_case.py`
+
+### Phase 5：日志与清理
+
+目标：
+
+- 问题可定位
+- 测试后可清理
+
+包括：
+
+- 日志目录重构
+- 动作级日志
+- 提供测试产物清理脚本或固定清理入口
+
+## 文档同步范围
+
+这轮及后续所有结构改造，都必须同步更新这些文档：
+
+- `README.md`
 - `AGENTS.md`
-- `docs/PLANS.md`
-- `docs/RELIABILITY.md`
-- `docs/SECURITY.md`
-- `docs/exec-plans/active/`
-- `docs/exec-plans/completed/`
+- `docs/ARCHITECTURE.md`
+- `docs/MCP_TOOLS.md`
+- `docs/MEMORY.md`
+- `docs/ROUTING_RULES.md`
+- `docs/FLOWS.md`
+- `docs/CHECKS.md`
+- `docs/EVALS.md`
 
-验收标准：
+要求：
 
-- 新 agent 进入仓库后，能从 `AGENTS.md` 找到主要知识入口
-- 架构、计划、质量、可靠性均有稳定落点
-- 文档不再只是面向人，而是同时面向 agent
+1. 目录结构、层级命名和文档描述一致
+2. 动作清单和代码能力一致
+3. HE 检查项和真实实现一致
 
+## 验证方式
 
-### Phase 2 - 把输出改成可机械验证对象
+每轮改动后至少跑：
 
-目标：
+1. `py_compile`
+2. `scripts/check_layers.py`
+3. 相关 contract check
+4. 相关 flow check
+5. 必要的 scenario check
 
-- 让每条审查结论都能被 verifier 检查
+required stdio MCP server 还必须通过：
 
-工作内容：
+- preflight initialize check
 
-- 将每个 criterion 的输出从自由文本改为严格 JSON
-- 补齐结构化字段
-- 新增 verifier，对证据、位置、结论完整性进行硬校验
-- verifier 不通过时，禁止进入汇总与导出
+## 清理策略
 
-建议修改：
+项目修改完成后，应清理：
 
-- `agents/orchestrator.py`
-- `agents/prompts/cn_prompts.py`
-- `main_workflow/main_workflow.py`
-- `api/models/schemas.py`
+- `he/runs/*`
+- `he/reports/*`
+- `data/logs/*`
+- 测试临时上传文件
+- 测试临时索引或中间文件
+- 已废弃的旧兼容目录
 
-建议新增：
+保留：
 
-- `tools/verification/criterion_verifier.py`
-- `tools/verification/report_gate.py`
-- `tools/verification/schemas.py`
+- 稳定代码
+- 稳定文档
+- 固定知识库材料
+- 必要配置模板
 
-结构化字段建议至少包括：
+运行产物不应进入提交：
 
-- `criterion_id`
-- `verdict`
-- `reason`
-- `evidence_quote`
-- `evidence_span`
-- `location`
-- `confidence`
+- `data/`
+- `he/runs/`
+- `he/reports/`
+- `knowledge_base/upload__*.pdf`
 
-验收标准：
+## 风险与注意点
 
-- 每条结论都能通过 schema 校验
-- 每个问题都具备证据字段
-- 无证据问题无法进入报告
-- 失败结果会进入修复循环，而不是静默通过
+1. 不要把 CLI 做成开放 shell
+2. 不要让 agent 直接自由执行副作用动作
+3. 不要把 policy 只写进 prompt，不落代码
+4. 不要把 HE 继续主要做成场景补丁系统
+5. 不要在重构时破坏稳定入口文件名
 
+## 成功标准
 
-### Phase 3 - 升级 review / reflection 为真正的质量 gate
+当以下条件成立时，这轮改造算成功：
 
-目标：
+1. `flow` 明显变薄
+2. 核心能力已动作化
+3. KB 和文档动作可独立测试
+4. HE 已能先测 contract，再测 flow
+5. agent 主要负责路由和结构化意图，而不是自由拍板副作用流程
+6. 文档、代码、HE 三层一致
 
-- 让 Reflector 从“建议者”变成“守门员”
+## 时间预估
 
-工作内容：
+如果按最小可用版推进：
 
-- 修复 JSON 解析失败即 `PASS` 的逻辑
-- 引入显式 grader rubric
-- 将 review 输出标准化
-- 允许 judge 使用独立配置，降低同源偏差
-- 将 verifier 失败与 reflector 反馈统一进入 repair loop
+- KB 动作 CLI 化 + flow 改造：`4-6 小时`
+- 文档动作 CLI 化 + flow 改造：`4-6 小时`
+- HE contract / flow 改造：`4-8 小时`
+- 日志和清理收尾：`2-4 小时`
 
-建议修改：
+完整做完一轮，预计：
 
-- `agents/reflector.py`
-- `agents/base_agent.py`
-- `agents/prompts/cn_prompts.py`
+`1 到 2 天`
 
-建议新增：
+## 当前优先级
 
-- `agents/grader.py`
-- `docs/review_rubrics/criterion_review.md`
+当前优先级固定为：
 
-验收标准：
-
-- Reflector 失效不会被视为通过
-- review 结果可结构化记录
-- repair loop 有明确退出条件
-- 同一错误模式能被稳定复现和修复
-
-
-### Phase 4 - 把日志升级成 trace，并接入 trace grading
-
-目标：
-
-- 从“任务日志”升级到“可评分轨迹”
-
-工作内容：
-
-- 将 workflow logger 升级为结构化 trace logger
-- 每个阶段都记录 span 级信息
-- 建立 trace grader
-- 让一次运行可以被整体评分，而不是只能看最终报告
-
-建议修改：
-
-- `main_workflow/workflow_logger.py`
-- `main_workflow/main_workflow.py`
-- `mcp_service/mcp_client/mcp_minimal.py`
-
-建议新增：
-
-- `logs/traces/`
-- `evals/trace_graders/`
-- `scripts/grade_traces.py`
-
-trace 级信息建议包括：
-
-- criterion id
-- retrieval mode
-- tool calls
-- sub-agent output
-- reflector output
-- verifier output
-- retries / repair rounds
-- final verdict
-
-验收标准：
-
-- 每次运行都可导出结构化 trace
-- trace 可用于 failure mode 分类
-- trace grader 能支持回归检测
-
-
-### Phase 5 - 将架构边界和质量要求写成机械约束
-
-目标：
-
-- 让“规则”成为自动执行的系统组成部分
-
-工作内容：
-
-- 将关键依赖方向变成 structural checks
-- 对输出结构、文档完整性、关键字段、上传安全做 hard checks
-- 将质量规则从 prompt 提升为脚本 / lint / test
-
-建议新增：
-
-- `checks/architecture_check.py`
-- `checks/report_schema_check.py`
-- `checks/docs_freshness_check.py`
-- `tests/`
-
-验收标准：
-
-- 违反关键架构边界会被直接发现
-- 缺字段、错字段、脏文档有明确失败信号
-- 规则具备可维护、可扩展的实现方式
-
-
-### Phase 6 - 建立持续垃圾回收和质量盘点机制
-
-目标：
-
-- 控制 entropy，持续修正 drift
-
-工作内容：
-
-- 周期性扫描失败模式
-- 发现和标注失效文档
-- 自动更新质量盘点文档
-- 持续找出 unsupported claims 的高发模式
-- 形成例行的质量回顾与修正流程
-
-建议新增：
-
-- `scripts/doc_gardening.py`
-- `scripts/failure_mode_report.py`
-- `docs/QUALITY_SCORE.md`
-- `docs/tech-debt-tracker.md`
-
-验收标准：
-
-- 可以周期性输出质量状态
-- 质量下降有可见信号
-- 常见坏模式能被持续清理，而不是堆积
-
-
-## 7. 建议实施顺序
-
-建议按以下顺序实施，而不是并行乱改：
-
-1. Phase 0
-2. Phase 2
-3. Phase 3
-4. Phase 4
-5. Phase 1
-6. Phase 5
-7. Phase 6
-
-原因：
-
-- 没有 benchmark，就无法判断优化是否真实有效
-- 没有结构化输出和 verifier，就无法建立硬质量门槛
-- 没有 trace，就无法定位失败模式
-- 没有 repo knowledge map，就无法把经验沉淀成长期杠杆
-
-
-## 8. 第一个迭代的最小范围
-
-第一轮不求“大而全”，只完成一个最小可用版本：
-
-- 建 benchmark
-- 改 criterion 输出为结构化 JSON
-- 引入 verifier
-- 修复 reflector 的软失败通过问题
-- 让最终报告必须通过质量 gate
-
-如果第一轮完成，项目就会从：
-
-- 可以运行
-
-变成：
-
-- 可以证明自己有没有变好
-
-
-## 9. 风险与注意事项
-
-### 9.1 不要过早复杂化 agent 拓扑
-
-问题：
-
-- 过早引入太多角色，会让系统更难评测
-
-策略：
-
-- 优先提升输出可验证性和回归能力
-
-### 9.2 不要把 prompt 当主控制面
-
-问题：
-
-- prompt 是必要的，但不是最稳定的约束层
-
-策略：
-
-- 规则优先落成 grader、verifier、lint、test
-
-### 9.3 不要只做报告美化
-
-问题：
-
-- 报告更漂亮不等于结果更可靠
-
-策略：
-
-- 所有工作优先服务于质量指标
-
-### 9.4 不要先追求完全通用
-
-问题：
-
-- 完全通用通常会牺牲首个场景的可落地性
-
-策略：
-
-- 先在合同审查上建立“评测驱动可靠性 harness”
-- 再抽象出可复用模式
-
-
-## 10. 对外可复用的总结方式
-
-本项目完成上述改造后，对外分享不建议描述为：
-
-- “我们做了一个合同审查 agent”
-
-更建议描述为：
-
-- “我们把领域规则转成 grader 和 verifier，用评测驱动 agent 的生成、验证、修复和回归。”
-
-一句话版本：
-
-`我们不是在堆 agent 角色，而是在构建一个评测驱动的可靠性 harness。`
-
-
-## 11. 立即下一步
-
-本计划落地后的第一个具体执行动作应为：
-
-1. 建立 `evals/` 基线
-2. 选出 20-30 份合同样本
-3. 为每份样本标注 5-10 个高风险 criterion
-4. 固定评分指标
-5. 用当前系统跑出第一版 baseline
-
-在完成这一步之前，不建议进行大规模 prompt 改写或 agent 角色扩张。
+1. `kb.*` 动作彻底收口
+2. `doc.*` 动作彻底收口
+3. agent 结构化意图 + self-check hook
+4. HE contract / flow checks
+5. 日志与清理

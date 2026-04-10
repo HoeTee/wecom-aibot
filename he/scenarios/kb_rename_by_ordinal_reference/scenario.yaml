@@ -1,0 +1,16 @@
+id: kb_rename_by_ordinal_reference
+goal: 当用户引用上一轮知识库候选列表中的“第 N 份文件”并要求改名时，系统应解析序号引用，进入知识库改名确认，而不是掉入 RAG 或无回复结束。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+global_gates:
+  - file_management_intent_must_not_call_rag
+  - agent_intent_packet_must_exist_before_tool_selection
+  - tool_execution_must_end_with_reply_or_explicit_error
+scenario_gates:
+  - id: kb_ordinal_rename_must_prepare_confirmation
+    description: 序号引用改名必须进入知识库改名确认流程。
+artifact_focus:
+  - assistant_reply
+  - flow_trace
+  - evaluator

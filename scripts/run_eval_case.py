@@ -1,0 +1,1206 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import yaml
+from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from check_layers import run_layer_checks
+except ImportError:  # pragma: no cover - module import path differs when run with -m
+    from scripts.check_layers import run_layer_checks
+
+from backend.memory import init_db
+from backend.caps.knowledge_base import (
+    export_kb_record,
+    list_kb_files,
+    list_pdf_records,
+    list_uploaded_kb_files,
+    match_related_kb_files,
+)
+from backend.runtime.config import load_mcp_host_config, load_mcp_server_configs_from_env
+from backend.runtime.connection import MCPServerConnection
+
+DB_PATH = PROJECT_ROOT / "data" / "memory.sqlite3"
+DEFAULT_MCP_CONFIG_PATH = PROJECT_ROOT / "config" / "mcp_servers.json"
+HE_DIR = PROJECT_ROOT / "he"
+SCENARIOS_DIR = HE_DIR / "scenarios"
+RUNS_DIR = HE_DIR / "runs"
+REPORTS_DIR = HE_DIR / "reports"
+GLOBAL_GATES_PATH = HE_DIR / "gates" / "global.yaml"
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def dump_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def parse_args_json(raw: str) -> dict[str, Any]:
+    try:
+        return json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def git_commit() -> str:
+    try:
+        return (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True)
+            .strip()
+        )
+    except Exception:
+        return ""
+
+
+def load_server_configs() -> list[Any]:
+    load_dotenv(PROJECT_ROOT / ".env")
+    server_configs = load_mcp_server_configs_from_env(os.environ)
+    if server_configs:
+        return server_configs
+    if DEFAULT_MCP_CONFIG_PATH.exists():
+        return load_mcp_host_config(DEFAULT_MCP_CONFIG_PATH).servers
+    return []
+
+
+async def _required_stdio_boot_async() -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    for config in load_server_configs():
+        if config.transport != "stdio" or not config.required:
+            continue
+
+        connection = MCPServerConnection(config)
+        stderr_log_path = (
+            PROJECT_ROOT / "data" / "logs" / "mcp" / f"{config.name}_stderr.log"
+        )
+        try:
+            await connection.connect()
+            results.append(
+                {
+                    "server_name": config.name,
+                    "transport": config.transport,
+                    "command": config.command,
+                    "args": list(config.args),
+                    "cwd": config.cwd,
+                    "stderr_log_path": str(stderr_log_path),
+                    "passed": True,
+                    "reason": "required stdio MCP server initialized successfully.",
+                }
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "server_name": config.name,
+                    "transport": config.transport,
+                    "command": config.command,
+                    "args": list(config.args),
+                    "cwd": config.cwd,
+                    "stderr_log_path": str(stderr_log_path),
+                    "passed": False,
+                    "reason": str(exc),
+                }
+            )
+        finally:
+            await connection.cleanup()
+
+    return {
+        "passed": all(item["passed"] for item in results) if results else True,
+        "checks": results,
+    }
+
+
+def required_stdio_boot_check() -> dict[str, Any]:
+    return asyncio.run(_required_stdio_boot_async())
+
+
+def latest_user_turn(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT id, session_id, request_id, role, content, created_at
+        FROM conversation_turns
+        WHERE session_id = ?
+          AND role = 'user'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (session_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"No user turns found for session_id={session_id}")
+    return row
+
+
+def next_assistant_turn(
+    conn: sqlite3.Connection,
+    session_id: str,
+    request_id: str | None,
+    user_turn_id: int,
+) -> sqlite3.Row | None:
+    if request_id:
+        row = conn.execute(
+            """
+            SELECT id, session_id, request_id, role, content, created_at
+            FROM conversation_turns
+            WHERE session_id = ?
+              AND request_id = ?
+              AND role = 'assistant'
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (session_id, request_id),
+        ).fetchone()
+        if row is not None:
+            return row
+
+    return conn.execute(
+        """
+        SELECT id, session_id, request_id, role, content, created_at
+        FROM conversation_turns
+        WHERE session_id = ?
+          AND role = 'assistant'
+          AND id > ?
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (session_id, user_turn_id),
+    ).fetchone()
+
+
+def recent_tool_calls(
+    conn: sqlite3.Connection,
+    session_id: str,
+    request_id: str | None,
+    from_created_at: str,
+) -> list[sqlite3.Row]:
+    if request_id:
+        rows = conn.execute(
+            """
+            SELECT id, request_id, tool_name, args_json, result_excerpt, created_at
+            FROM tool_calls
+            WHERE session_id = ?
+              AND request_id = ?
+            ORDER BY id ASC
+            """,
+            (session_id, request_id),
+        ).fetchall()
+        if rows:
+            return rows
+
+    return conn.execute(
+        """
+        SELECT id, request_id, tool_name, args_json, result_excerpt, created_at
+        FROM tool_calls
+        WHERE session_id = ?
+          AND created_at >= datetime(?, '-5 second')
+        ORDER BY id ASC
+        """,
+        (session_id, from_created_at),
+    ).fetchall()
+
+
+def current_doc_binding(conn: sqlite3.Connection, session_id: str, request_id: str | None) -> sqlite3.Row | None:
+    if request_id:
+        row = conn.execute(
+            """
+            SELECT request_id, doc_id, doc_url, doc_name, last_tool_name, last_user_text, updated_at
+            FROM session_docs
+            WHERE session_id = ?
+              AND request_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (session_id, request_id),
+        ).fetchone()
+        if row is not None:
+            return row
+
+    return conn.execute(
+        """
+        SELECT request_id, doc_id, doc_url, doc_name, last_tool_name, last_user_text, updated_at
+        FROM session_docs
+        WHERE session_id = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (session_id,),
+    ).fetchone()
+
+
+def request_uploaded_file(conn: sqlite3.Connection, session_id: str, request_id: str | None) -> sqlite3.Row | None:
+    if request_id:
+        row = conn.execute(
+            """
+            SELECT request_id, file_name, stored_path, file_sha256, upload_action,
+                   matched_file_name, matched_stored_path, created_at
+            FROM session_uploaded_files
+            WHERE session_id = ?
+              AND request_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (session_id, request_id),
+        ).fetchone()
+        if row is not None:
+            return row
+
+    return conn.execute(
+        """
+        SELECT request_id, file_name, stored_path, file_sha256, upload_action,
+               matched_file_name, matched_stored_path, created_at
+        FROM session_uploaded_files
+        WHERE session_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (session_id,),
+    ).fetchone()
+
+
+def request_flow_events(conn: sqlite3.Connection, session_id: str, request_id: str | None, from_created_at: str) -> list[sqlite3.Row]:
+    if request_id:
+        rows = conn.execute(
+            """
+            SELECT id, request_id, layer_at_event, event_name, payload_json, created_at
+            FROM flow_events
+            WHERE session_id = ?
+              AND request_id = ?
+            ORDER BY id ASC
+            """,
+            (session_id, request_id),
+        ).fetchall()
+        if rows:
+            return rows
+
+    return conn.execute(
+        """
+        SELECT id, request_id, layer_at_event, event_name, payload_json, created_at
+        FROM flow_events
+        WHERE session_id = ?
+          AND created_at >= datetime(?, '-5 second')
+        ORDER BY id ASC
+        """,
+        (session_id, from_created_at),
+    ).fetchall()
+
+
+def latest_doc_write_payload(tool_calls: list[sqlite3.Row]) -> dict[str, Any]:
+    for row in reversed(tool_calls):
+        if row["tool_name"].endswith("edit_doc_content"):
+            args_dict = parse_args_json(row["args_json"])
+            return {
+                "tool_name": row["tool_name"],
+                "args": args_dict,
+                "created_at": row["created_at"],
+            }
+    return {"tool_name": None, "args": {}, "created_at": None}
+
+
+def latest_rag_query_payload(tool_calls: list[sqlite3.Row]) -> dict[str, Any]:
+    for row in reversed(tool_calls):
+        if row["tool_name"].endswith("llamaindex_rag_query"):
+            args_dict = parse_args_json(row["args_json"])
+            return {
+                "tool_name": row["tool_name"],
+                "original_query": args_dict.get("query", ""),
+                "rewritten_query": args_dict.get("rewritten_query", ""),
+                "created_at": row["created_at"],
+            }
+    return {
+        "tool_name": None,
+        "original_query": "",
+        "rewritten_query": "",
+        "created_at": None,
+    }
+
+
+def build_flow_trace(metadata: dict[str, Any], flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    for row in flow_rows:
+        payload = parse_args_json(row["payload_json"])
+        events.append(
+            {
+                "timestamp": row["created_at"],
+                "layer_at_event": row["layer_at_event"],
+                "event": row["event_name"],
+                **payload,
+            }
+        )
+    return {"metadata": metadata, "events": events}
+
+
+def collect_flow_results(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    for row in flow_rows:
+        payload = parse_args_json(row["payload_json"])
+        events.append(
+            {
+                "event": row["event_name"],
+                "layer_at_event": row["layer_at_event"],
+                "created_at": row["created_at"],
+                "payload": payload,
+            }
+        )
+
+    event_names = [item["event"] for item in events]
+    checks: list[dict[str, Any]] = []
+
+    route_present = "route_selected" in event_names
+    checks.append(
+        {
+            "id": "flow_route_selected_present",
+            "passed": route_present,
+            "reason": "flow trace 包含 route_selected。"
+            if route_present
+            else "flow trace 缺少 route_selected。",
+        }
+    )
+
+    stop_present = "stop_reason" in event_names
+    checks.append(
+        {
+            "id": "flow_stop_reason_present",
+            "passed": stop_present,
+            "reason": "flow trace 包含 stop_reason。"
+            if stop_present
+            else "flow trace 缺少 stop_reason。",
+        }
+    )
+
+    if "assistant_requested_tools" in event_names:
+        intent_packet_index = next(
+            (index for index, item in enumerate(events) if item["event"] == "intent_packet_created"),
+            None,
+        )
+        plan_index = next(
+            (index for index, item in enumerate(events) if item["event"] == "agent_plan_created"),
+            None,
+        )
+        self_check_index = next(
+            (index for index, item in enumerate(events) if item["event"] == "agent_self_check"),
+            None,
+        )
+        tool_called_index = next(
+            (index for index, item in enumerate(events) if item["event"] == "tool_called"),
+            None,
+        )
+        plan_present = plan_index is not None
+        checks.append(
+            {
+                "id": "flow_intent_packet_present",
+                "passed": intent_packet_index is not None,
+                "reason": "tool 调用前存在 intent_packet_created。"
+                if intent_packet_index is not None
+                else "assistant 已请求 tool，但 flow trace 缺少 intent_packet_created。",
+            }
+        )
+        checks.append(
+            {
+                "id": "flow_agent_plan_present",
+                "passed": plan_present,
+                "reason": "tool 调用前存在 agent_plan_created。"
+                if plan_present
+                else "assistant 已请求 tool，但 flow trace 缺少 agent_plan_created。",
+            }
+        )
+
+        self_check_present = self_check_index is not None
+        checks.append(
+            {
+                "id": "flow_agent_self_check_present",
+                "passed": self_check_present,
+                "reason": "tool 调用前存在 agent_self_check。"
+                if self_check_present
+                else "assistant 已请求 tool，但 flow trace 缺少 agent_self_check。",
+            }
+        )
+
+        plan_ordered = (
+            plan_index is not None
+            and self_check_index is not None
+            and plan_index <= self_check_index
+        )
+        checks.append(
+            {
+                "id": "flow_agent_plan_before_self_check",
+                "passed": plan_ordered,
+                "reason": "agent_plan_created 出现在 agent_self_check 之前。"
+                if plan_ordered
+                else "agent_plan_created 没有出现在 agent_self_check 之前。",
+            }
+        )
+
+        self_check_ordered = (
+            self_check_index is not None
+            and tool_called_index is not None
+            and self_check_index < tool_called_index
+        )
+        checks.append(
+            {
+                "id": "flow_agent_self_check_before_tool_call",
+                "passed": self_check_ordered,
+                "reason": "agent_self_check 出现在首个 tool_called 之前。"
+                if self_check_ordered
+                else "agent_self_check 没有出现在首个 tool_called 之前。",
+            }
+        )
+        intent_packet_ordered = (
+            intent_packet_index is not None
+            and tool_called_index is not None
+            and intent_packet_index < tool_called_index
+        )
+        checks.append(
+            {
+                "id": "flow_intent_packet_before_tool_call",
+                "passed": intent_packet_ordered,
+                "reason": "intent_packet_created 出现在首个 tool_called 之前。"
+                if intent_packet_ordered
+                else "intent_packet_created 没有出现在首个 tool_called 之前。",
+            }
+        )
+        reply_index = next(
+            (index for index, item in enumerate(events) if item["event"] == "reply_generated"),
+            None,
+        )
+        checks.append(
+            {
+                "id": "flow_tool_execution_has_reply",
+                "passed": reply_index is not None,
+                "reason": "tool 执行后存在 reply_generated。"
+                if reply_index is not None
+                else "assistant 已请求 tool，但 flow trace 缺少 reply_generated。",
+            }
+        )
+
+    return {"passed": all(item["passed"] for item in checks), "checks": checks}
+
+
+def latest_attachment_payload(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    for row in reversed(flow_rows):
+        if row["event_name"] != "attachment_prepared":
+            continue
+        payload = parse_args_json(row["payload_json"])
+        return {
+            "attachment_type": payload.get("attachment_type"),
+            "attachment_name": payload.get("attachment_name"),
+            "attachment_path": payload.get("attachment_path"),
+            "created_at": row["created_at"],
+        }
+    return {
+        "attachment_type": None,
+        "attachment_name": None,
+        "attachment_path": None,
+        "created_at": None,
+    }
+
+
+def latest_route_selected(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    for row in reversed(flow_rows):
+        if row["event_name"] != "route_selected":
+            continue
+        payload = parse_args_json(row["payload_json"])
+        return dict(payload.get("route_selected") or {})
+    return {}
+
+
+def latest_intent_packet(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    for row in reversed(flow_rows):
+        if row["event_name"] != "intent_packet_created":
+            continue
+        return parse_args_json(row["payload_json"])
+    return {}
+
+
+def latest_stop_reason(flow_rows: list[sqlite3.Row]) -> dict[str, Any]:
+    for row in reversed(flow_rows):
+        if row["event_name"] != "stop_reason":
+            continue
+        return parse_args_json(row["payload_json"])
+    return {}
+
+
+def requested_tool_names(flow_rows: list[sqlite3.Row]) -> list[str]:
+    for row in reversed(flow_rows):
+        if row["event_name"] != "assistant_requested_tools":
+            continue
+        payload = parse_args_json(row["payload_json"])
+        tool_names = payload.get("tool_names")
+        if isinstance(tool_names, list):
+            return [str(name).strip() for name in tool_names if str(name).strip()]
+    return []
+
+
+def collect_contract_results() -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+
+    kb_list = list_kb_files()
+    list_passed = (
+        kb_list.get("action") == "kb.list"
+        and isinstance(kb_list.get("records"), list)
+        and isinstance(kb_list.get("total"), int)
+    )
+    checks.append(
+        {
+            "id": "kb_list_contract",
+            "passed": list_passed,
+            "reason": "kb.list 返回了稳定 records/total 结构。"
+            if list_passed
+            else "kb.list 没有返回稳定 records/total 结构。",
+        }
+    )
+
+    kb_uploads = list_uploaded_kb_files(limit=10)
+    upload_records = kb_uploads.get("records") or []
+    uploads_passed = kb_uploads.get("action") == "kb.list_uploads" and all(
+        item.get("source_type") == "upload" for item in upload_records
+    )
+    checks.append(
+        {
+            "id": "kb_list_uploads_contract",
+            "passed": uploads_passed,
+            "reason": "kb.list_uploads 只返回 upload source_type。"
+            if uploads_passed
+            else "kb.list_uploads 返回结果中混入了非 upload source_type。",
+        }
+    )
+
+    sample_query = ""
+    records = kb_list.get("records") or []
+    if records:
+        sample_query = str(records[0].get("file_name") or "")
+    kb_match = match_related_kb_files(sample_query or "pdf", limit=3)
+    match_passed = (
+        kb_match.get("action") == "kb.match_related"
+        and isinstance(kb_match.get("records"), list)
+        and "query" in kb_match
+    )
+    checks.append(
+        {
+            "id": "kb_match_related_contract",
+            "passed": match_passed,
+            "reason": "kb.match_related 返回了稳定候选结构。"
+            if match_passed
+            else "kb.match_related 没有返回稳定候选结构。",
+        }
+    )
+
+    export_passed = True
+    export_reason = "当前无知识库文件，跳过 kb.export 合约检查。"
+    if records:
+        kb_export = export_kb_record(records[0])
+        export_path = str(kb_export.get("path") or "").strip()
+        export_passed = kb_export.get("action") == "kb.export" and bool(export_path) and Path(export_path).exists()
+        export_reason = (
+            "kb.export 返回了有效的文件路径。"
+            if export_passed
+            else "kb.export 没有返回有效的文件路径。"
+        )
+    checks.append(
+        {
+            "id": "kb_export_contract",
+            "passed": export_passed,
+            "reason": export_reason,
+        }
+    )
+
+    return {"passed": all(item["passed"] for item in checks), "checks": checks}
+
+
+def evaluate_global_gate(
+    gate_id: str,
+    assistant_reply: str,
+    tool_calls: list[sqlite3.Row],
+    doc_binding: sqlite3.Row | None,
+    user_request: str,
+    flow_rows: list[sqlite3.Row],
+) -> tuple[bool, str]:
+    tool_names = [row["tool_name"] for row in tool_calls]
+    intent_packet = latest_intent_packet(flow_rows)
+    stop_reason = latest_stop_reason(flow_rows)
+    requested_tools = requested_tool_names(flow_rows)
+
+    if gate_id == "must_bind_doc_triple":
+        if doc_binding and doc_binding["doc_id"] and doc_binding["doc_url"] and doc_binding["doc_name"]:
+            return True, "doc_id/doc_url/doc_name 已完整绑定。"
+        return False, "缺少完整的文档三元组。"
+
+    if gate_id == "must_not_claim_success_on_failure":
+        failure_tools = [row["tool_name"] for row in tool_calls if '"errcode": 0' not in str(row["result_excerpt"])]
+        success_markers = ("已创建", "已更新", "已生成", "已加入知识库", "文档已更新")
+        if failure_tools and any(token in assistant_reply for token in success_markers):
+            return False, f"存在失败的 tool 调用，但 assistant 仍声称成功：{failure_tools}"
+        return True, "未发现失败后误报成功。"
+
+    if gate_id == "must_reuse_existing_doc_on_followup":
+        followup_tokens = ("刚才那个文档", "刚才那份文档", "上一个文档", "继续改", "补一个", "更新一下")
+        if any(token in user_request for token in followup_tokens):
+            if any(name.endswith("create_doc") for name in tool_names):
+                return False, "后续编辑请求错误地新建了文档。"
+            if any(name.endswith("edit_doc_content") for name in tool_names):
+                return True, "后续编辑请求复用了已有文档。"
+        return True, "当前请求不属于必须复用旧文档的 follow-up。"
+
+    if gate_id == "must_follow_requested_structure":
+        requested_sections = ["背景", "每篇论文摘要", "横向对比", "结论与建议"]
+        write_payload = latest_doc_write_payload(tool_calls)
+        content = str(write_payload["args"].get("content", "") or "")
+        missing = [section for section in requested_sections if section not in content]
+        if missing:
+            return False, f"缺少结构部分：{missing}"
+        return True, "写入内容包含要求结构。"
+
+    if gate_id == "file_management_intent_must_not_call_rag":
+        intent_family = str(intent_packet.get("intent_family") or "").strip()
+        intent = str(intent_packet.get("intent") or "").strip()
+        if intent_family == "knowledge_base" and intent in {"kb.rename", "kb.delete", "kb.export"}:
+            rag_tools = [
+                name
+                for name in {*(tool_names or []), *(requested_tools or [])}
+                if str(name).endswith("llamaindex_rag_query")
+            ]
+            if rag_tools:
+                return False, f"文件管理意图错误调用了 RAG：{rag_tools}"
+            return True, "文件管理意图没有掉入 RAG。"
+        return True, "当前请求不属于必须禁止 RAG 的文件管理意图。"
+
+    if gate_id == "agent_intent_packet_must_exist_before_tool_selection":
+        if (tool_calls or requested_tools) and not intent_packet:
+            return False, "存在 tool 调用，但缺少 agent intent packet。"
+        return True, "tool 调用前已存在 agent intent packet，或当前无 tool 调用。"
+
+    if gate_id == "tool_execution_must_end_with_reply_or_explicit_error":
+        if not tool_calls and not requested_tools:
+            return True, "当前无 tool 调用。"
+        if assistant_reply.strip():
+            return True, "tool 调用后产生了 assistant reply。"
+        stop_code = str(stop_reason.get("code") or "").strip()
+        if stop_code in {"agent_timeout", "guard_stop", "clarify_waiting_user"}:
+            return True, f"tool 调用后以显式 stop_reason 结束：{stop_code}"
+        return False, "tool 调用后既没有 assistant reply，也没有显式 stop_reason。"
+
+    if gate_id == "smartsheet_intent_must_not_call_rag":
+        intent_family = str(intent_packet.get("intent_family") or "").strip()
+        if intent_family != "smartsheet":
+            return True, "当前请求不属于智能表格意图。"
+        rag_tools = [
+            name
+            for name in {*(tool_names or []), *(requested_tools or [])}
+            if str(name).endswith("llamaindex_rag_query")
+        ]
+        if rag_tools:
+            return False, f"智能表格意图错误调用了 RAG：{rag_tools}"
+        return True, "智能表格意图没有掉入 RAG。"
+
+    return True, f"未实现的 global gate，默认跳过：{gate_id}"
+
+
+def evaluate_scenario_gate(
+    gate_id: str,
+    assistant_reply: str,
+    tool_calls: list[sqlite3.Row],
+    user_request: str,
+    uploaded_file: sqlite3.Row | None,
+    flow_rows: list[sqlite3.Row],
+    attachment_payload: dict[str, Any],
+) -> tuple[bool, str]:
+    write_payload = latest_doc_write_payload(tool_calls)
+    content = str(write_payload["args"].get("content", "") or "")
+    tool_names = [row["tool_name"] for row in tool_calls]
+    route_selected = latest_route_selected(flow_rows)
+    intent_packet = latest_intent_packet(flow_rows)
+
+    if gate_id == "fresh_regenerate_must_not_reuse_existing_doc":
+        if "重新生成" in user_request and "文档" in user_request:
+            if any(name.endswith("create_doc") for name in tool_names):
+                return True, "重新生成请求创建了新文档。"
+            if any(name.endswith("edit_doc_content") for name in tool_names):
+                return False, "重新生成请求直接走了 edit_doc_content，疑似复用旧文档。"
+        return True, "不适用或未发现复用旧文档。"
+
+    if gate_id == "generated_doc_must_not_contain_placeholders":
+        if "..." in content:
+            return False, "写入内容包含 `...` 占位符。"
+        return True, "写入内容未发现占位符。"
+
+    if gate_id == "generated_doc_must_include_required_sections":
+        required_sections = ["背景", "每篇论文摘要", "横向对比", "结论与建议"]
+        missing = [section for section in required_sections if section not in content]
+        if missing:
+            return False, f"写入内容缺少部分：{missing}"
+        return True, "写入内容包含 1/2/3/4 四部分。"
+
+    if gate_id == "generated_doc_must_not_add_unrequested_table":
+        if not any(token in user_request for token in ("表格", "对比表", "comparison table")):
+            forbidden_markers = ("## 5.", "### 5.", "技术对比表", "| 方法 | 优点 | 局限 |")
+            if any(marker in content for marker in forbidden_markers):
+                return False, "用户未要求表格，但写入内容提前出现了第 5 节或对比表。"
+        return True, "未发现未请求的表格内容。"
+
+    if gate_id == "uploaded_pdf_must_be_recorded":
+        if uploaded_file and uploaded_file["file_name"] and uploaded_file["stored_path"]:
+            return True, "已记录最近上传文件状态。"
+        return False, "缺少最近上传文件的结构化状态。"
+
+    if gate_id == "followup_add_to_kb_must_not_request_file_again":
+        refusal_markers = (
+            "请提供您要添加到知识库的文件",
+            "上传该文件",
+            "目前我无法直接接收文件",
+            "请补充信息",
+        )
+        if any(marker in assistant_reply for marker in refusal_markers):
+            return False, "已经有上传文件状态，但 assistant 仍再次索要文件。"
+        return True, "未发现重复索要文件。"
+
+    if gate_id == "followup_add_to_kb_must_ack_existing_upload":
+        if not uploaded_file:
+            return False, "没有可用于确认的上传文件状态。"
+        success_markers = ("已加入知识库", "已经加入知识库", "已更新到知识库", "已经在知识库里")
+        if any(marker in assistant_reply for marker in success_markers):
+            return True, "assistant 正确确认了已上传文件的知识库状态。"
+        return False, "assistant 没有确认刚上传文件已进入知识库。"
+
+    if gate_id == "duplicate_upload_same_content_must_be_noticed":
+        if not uploaded_file:
+            return False, "缺少最近上传文件状态。"
+        action = str(uploaded_file["upload_action"] or "")
+        if action not in {"unchanged", "duplicate_content"}:
+            return False, f"最近上传动作不是同内容重复上传：{action}"
+        markers = ("内容完全一致", "未重复加入", "未再次写入", "文件名和内容都重复")
+        if any(marker in assistant_reply for marker in markers):
+            return True, "assistant 明确提示了同内容重复上传。"
+        return False, "assistant 没有明确提示同内容重复上传。"
+
+    if gate_id == "same_name_upload_update_must_be_noticed":
+        if not uploaded_file:
+            return False, "缺少最近上传文件状态。"
+        action = str(uploaded_file["upload_action"] or "")
+        if action != "replaced":
+            return False, f"最近上传动作不是同名更新：{action}"
+        if "同名" in assistant_reply and any(marker in assistant_reply for marker in ("已存在", "更新")):
+            return True, "assistant 明确提示了同名文件更新。"
+        return False, "assistant 没有明确提示同名文件更新。"
+
+    if gate_id == "kb_list_must_return_count_and_top_files":
+        has_count = any(token in assistant_reply for token in ("当前共有", "知识库里当前共有", "共有", "目前有"))
+        list_lines = [line for line in assistant_reply.splitlines() if re.match(r"^\d+\.\s", line.strip())]
+        if has_count and list_lines:
+            return True, "知识库列表回复包含数量和文件列表。"
+        return False, "知识库列表回复缺少数量或列表。"
+
+    if gate_id == "kb_related_query_must_return_candidates":
+        candidate_lines = [line for line in assistant_reply.splitlines() if re.match(r"^\d+\.\s", line.strip())]
+        if candidate_lines and "相关" in assistant_reply:
+            return True, "相关性查询回复包含候选列表。"
+        return False, "相关性查询回复没有给出候选列表。"
+
+    if gate_id == "kb_export_must_clarify_original_or_summary":
+        if all(token in assistant_reply for token in ("原", "PDF", "摘要")):
+            return True, "导出流程已先澄清原文件还是摘要。"
+        return False, "导出流程没有澄清原文件还是摘要。"
+
+    if gate_id == "kb_original_export_must_prepare_attachment":
+        if attachment_payload.get("attachment_type") == "file" and attachment_payload.get("attachment_path"):
+            return True, "导出原文件时已准备 attachment。"
+        return False, "导出原文件时没有记录 attachment。"
+
+    if gate_id == "kb_delete_must_confirm_before_delete":
+        if "确认删除" in assistant_reply or ("删除" in assistant_reply and "确认" in assistant_reply):
+            return True, "删除前已要求确认。"
+        return False, "删除流程没有要求确认。"
+
+    if gate_id == "kb_list_followup_must_honor_full_scope":
+        total = len(list_pdf_records())
+        list_lines = [line for line in assistant_reply.splitlines() if re.match(r"^\d+\.\s", line.strip())]
+        if route_selected.get("detail") in {"list_files_followup_full", "list_files_full"} and len(list_lines) >= total:
+            return True, "用户强调全量列表后，系统返回了全部知识库文件。"
+        return False, "用户强调全量列表后，系统仍未返回全部知识库文件。"
+
+    if gate_id == "kb_uploaded_list_must_only_show_uploaded_files":
+        uploaded_names = {item["file_name"] for item in list_pdf_records(source_type="upload")}
+        base_names = {item["file_name"] for item in list_pdf_records(source_type="base")}
+        list_lines = [line.strip() for line in assistant_reply.splitlines() if re.match(r"^\d+\.\s", line.strip())]
+        mentioned = []
+        for line in list_lines:
+            _, _, tail = line.partition(".")
+            mentioned.append(tail.strip().split("：", 1)[0].strip())
+        if route_selected.get("detail") not in {"list_uploaded_files", "list_uploaded_files_full"}:
+            return False, "上传文件列表请求没有进入 uploaded files 路由。"
+        if any(name in base_names for name in mentioned):
+            return False, "上传文件列表中混入了固定知识库材料。"
+        if mentioned and all(name in uploaded_names for name in mentioned):
+            return True, "上传文件列表只返回了上传文件。"
+        return False, "上传文件列表没有返回明确的上传文件集合。"
+
+    if gate_id == "kb_rename_request_must_stay_in_knowledge_base_scope":
+        if route_selected.get("code") != "knowledge_base":
+            return False, "知识库改名请求没有进入 knowledge_base 路由。"
+        if any(token in assistant_reply for token in ("企业微信文档", "企微文档", "文档标题")):
+            return False, "知识库改名请求错误回到了企微文档语义。"
+        if any(token in assistant_reply for token in ("改名", "重命名", "新名字")):
+            return True, "知识库改名请求保持在知识库文件语义内。"
+        return False, "知识库改名请求没有给出明确的知识库文件改名响应。"
+
+    if gate_id == "kb_rename_specific_file_must_prepare_confirmation":
+        if route_selected.get("detail") != "rename_confirm":
+            return False, "明确文件名和新名称后，没有进入 rename_confirm 路由。"
+        if any(token in assistant_reply for token in ("确认改名", "改名为")):
+            return True, "明确改名请求后，系统先进入确认。"
+        return False, "明确改名请求后，系统没有准备确认步骤。"
+
+    if gate_id == "kb_ordinal_rename_must_prepare_confirmation":
+        if "第" not in user_request or "名字" not in user_request:
+            return True, "当前请求不属于序号引用改名。"
+        if route_selected.get("code") != "knowledge_base":
+            return False, "序号引用改名没有进入 knowledge_base 路由。"
+        if route_selected.get("detail") != "rename_confirm":
+            return False, "序号引用改名没有进入 rename_confirm 路由。"
+        if any(name.endswith("llamaindex_rag_query") for name in tool_names):
+            return False, "序号引用改名错误调用了 RAG。"
+        if any(token in assistant_reply for token in ("确认改名", "改名为", "harness engineering")):
+            return True, "序号引用改名已准备确认。"
+        return False, "序号引用改名没有给出明确确认。"
+
+    if gate_id == "smartsheet_request_must_not_fall_back_to_kb_list":
+        if "智能表格" not in user_request and "smartsheet" not in user_request.lower():
+            return True, "当前请求不属于智能表格。"
+        if route_selected.get("code") != "smartsheet":
+            return False, "智能表格请求没有进入 smartsheet 路由。"
+        if route_selected.get("detail") in {"list_files", "list_files_full", "list_uploaded_files"}:
+            return False, "智能表格请求错误退化成了知识库列表。"
+        list_lines = [line for line in assistant_reply.splitlines() if re.match(r"^\d+\.\s", line.strip())]
+        if list_lines and "智能表格" not in assistant_reply:
+            return False, "智能表格请求只返回了文件列表，没有进入表格创建语义。"
+        return True, "智能表格请求没有退化成知识库列表。"
+
+    if gate_id == "smartsheet_auth_expired_must_fail_fast":
+        if "智能表格" not in user_request and "smartsheet" not in user_request.lower():
+            return True, "当前请求不属于智能表格。"
+        auth_fail = any(
+            token in str(row["result_excerpt"]).lower()
+            for row in tool_calls
+            for token in ("authorization expired", '"errcode": 850003', "'errcode': 850003")
+        )
+        if not auth_fail:
+            return True, "当前未检测到智能表格授权过期。"
+        if route_selected.get("code") != "smartsheet":
+            return False, "授权过期时没有留在 smartsheet 路由内快速失败。"
+        if any(token in assistant_reply.lower() for token in ("authorization expired", "授权")):
+            return True, "智能表格授权过期时已快速失败并明确提示。"
+        return False, "智能表格授权过期时没有明确提示授权问题。"
+
+    if gate_id == "smartsheet_update_schema_must_reuse_bound_doc":
+        intent = str(intent_packet.get("intent") or "").strip()
+        if intent != "smartsheet.update_schema":
+            return True, "当前请求不属于智能表格结构更新。"
+        if route_selected.get("code") != "smartsheet":
+            return False, "智能表格结构更新请求没有进入 smartsheet 路由。"
+        create_doc_tools = [name for name in tool_names if name.endswith("create_doc")]
+        if create_doc_tools:
+            return False, f"智能表格结构更新错误地重新创建了表：{create_doc_tools}"
+        if not any(
+            name.endswith("smartsheet_add_fields") or name.endswith("smartsheet_add_records")
+            for name in tool_names
+        ):
+            return False, "智能表格结构更新没有继续执行字段或记录写入。"
+        return True, "智能表格结构更新复用了当前表，没有重新创建。"
+
+    if gate_id == "doc_merge_must_confirm_target_source_action":
+        required_tokens = ("目标文档", "来源文档", "动作")
+        if all(token in assistant_reply for token in required_tokens):
+            return True, "合并流程已确认目标文档、来源文档和动作。"
+        return False, "合并流程缺少目标/来源/动作确认。"
+
+    if gate_id == "doc_replace_must_preview_scope_before_execution":
+        if "我准备替换当前文档里的这部分内容" in assistant_reply and "章节" in assistant_reply:
+            return True, "替换流程已展示待替换部分。"
+        return False, "替换流程没有展示待替换内容预览。"
+
+    if gate_id == "doc_expand_must_confirm_generated_title":
+        if "新章节标题" in assistant_reply or "我准备把新章节标题定为" in assistant_reply:
+            return True, "扩写流程已确认自动生成的标题。"
+        return False, "扩写流程没有确认新章节标题。"
+
+    return True, f"未实现的 scenario gate，默认跳过：{gate_id}"
+
+
+def suggested_fix_layers(failed_gate_ids: list[str], layer_check_passed: bool) -> dict[str, Any]:
+    primary = {"layer": "flow", "directory": "backend/flow/chat.py"}
+    secondary = {"layer": "state", "directory": "backend/state/store.py"}
+
+    if not layer_check_passed:
+        primary = {"layer": "runtime", "directory": "backend/runtime/"}
+        secondary = {"layer": "tools", "directory": "backend/tools/"}
+    elif "kb_action_contracts_must_pass" in failed_gate_ids:
+        primary = {"layer": "caps", "directory": "backend/caps/knowledge_base.py"}
+        secondary = {"layer": "runtime", "directory": "backend/runtime/cli.py"}
+    elif "required_stdio_mcp_must_initialize" in failed_gate_ids:
+        primary = {"layer": "tools", "directory": "backend/mcp_server_local/"}
+        secondary = {"layer": "runtime", "directory": "backend/runtime/"}
+    elif any(gate_id in failed_gate_ids for gate_id in ("must_bind_doc_triple", "must_reuse_existing_doc_on_followup")):
+        primary = {"layer": "state", "directory": "backend/state/store.py"}
+        secondary = {"layer": "runtime", "directory": "backend/runtime/"}
+    elif any(
+        gate_id in failed_gate_ids
+        for gate_id in (
+            "generated_doc_must_include_required_sections",
+            "generated_doc_must_not_add_unrequested_table",
+            "generated_doc_must_not_contain_placeholders",
+            "must_follow_requested_structure",
+        )
+    ):
+        primary = {"layer": "flow", "directory": "backend/flow/agent_core.py"}
+        secondary = {"layer": "runtime", "directory": "backend/runtime/"}
+
+    return {"primary": primary, "secondary": secondary}
+
+
+def write_run_summary(
+    run_id: str,
+    scenario_id: str,
+    evaluator: dict[str, Any],
+    layer_checks: dict[str, Any],
+    contract_results: dict[str, Any],
+    flow_results: dict[str, Any],
+) -> None:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    report_json_path = REPORTS_DIR / f"{run_id}.json"
+    report_md_path = REPORTS_DIR / f"{run_id}.md"
+
+    existing_json: dict[str, Any] = {}
+    if report_json_path.exists():
+        existing_json = json.loads(report_json_path.read_text(encoding="utf-8"))
+
+    scenarios = existing_json.get("scenarios", {})
+    scenarios[scenario_id] = evaluator
+    report_payload = {
+        "run_id": run_id,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "layer_checks": layer_checks,
+        "contract_results": contract_results,
+        "flow_results": flow_results,
+        "scenarios": scenarios,
+        "passed": layer_checks.get("passed", True) and all(
+            scenario_result.get("passed", False) for scenario_result in scenarios.values()
+        ),
+    }
+    dump_json(report_json_path, report_payload)
+
+    lines = [
+        f"# 评测报告：{run_id}",
+        "",
+        f"- 总体是否通过：{'是' if report_payload['passed'] else '否'}",
+        f"- layer checks：{'通过' if layer_checks.get('passed', True) else '失败'}",
+        f"- contract checks：{'通过' if contract_results.get('passed', True) else '失败'}",
+        f"- flow checks：{'通过' if flow_results.get('passed', True) else '失败'}",
+        "",
+        "## 场景结果",
+    ]
+    for name, scenario_result in sorted(scenarios.items()):
+        lines.extend(
+            [
+                f"### {name}",
+                f"- 是否通过：{'是' if scenario_result.get('passed') else '否'}",
+                f"- 失败项：{', '.join(scenario_result.get('failed_checks', [])) or '无'}",
+                "",
+            ]
+        )
+    report_md_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def main() -> None:
+    init_db()
+    parser = argparse.ArgumentParser(description="Export latest WeCom eval run and validate gates.")
+    parser.add_argument("--scenario-id", required=True)
+    parser.add_argument("--session-id", required=True)
+    parser.add_argument("--run-id", default=datetime.now().strftime("%Y%m%d-%H%M%S"))
+    args = parser.parse_args()
+
+    scenario_dir = SCENARIOS_DIR / args.scenario_id
+    scenario = load_yaml(scenario_dir / "scenario.yaml")
+    global_gates_config = load_yaml(GLOBAL_GATES_PATH)
+
+    global_gate_catalog = {gate["id"]: gate.get("description", "") for gate in global_gates_config.get("gates", [])}
+    scenario_gate_catalog = {gate["id"]: gate.get("description", "") for gate in scenario.get("scenario_gates", [])}
+
+    run_dir = RUNS_DIR / args.run_id / args.scenario_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    stdio_boot = required_stdio_boot_check()
+    dump_json(RUNS_DIR / args.run_id / "required_stdio_boot.json", stdio_boot)
+
+    with connect() as conn:
+        user_turn = latest_user_turn(conn, args.session_id)
+        request_id = str(user_turn["request_id"] or "").strip() or None
+        assistant_turn = next_assistant_turn(conn, args.session_id, request_id, user_turn["id"])
+        tool_calls = recent_tool_calls(conn, args.session_id, request_id, user_turn["created_at"])
+        doc_binding = current_doc_binding(conn, args.session_id, request_id)
+        uploaded_file = request_uploaded_file(conn, args.session_id, request_id)
+        flow_rows = request_flow_events(conn, args.session_id, request_id, user_turn["created_at"])
+
+    assistant_reply = str(assistant_turn["content"] if assistant_turn else "")
+    user_request = str(user_turn["content"])
+    write_payload = latest_doc_write_payload(tool_calls)
+    rag_query_payload = latest_rag_query_payload(tool_calls)
+    attachment_payload = latest_attachment_payload(flow_rows)
+    commit = git_commit()
+
+    metadata = {
+        "scenario_id": args.scenario_id,
+        "run_id": args.run_id,
+        "session_id": args.session_id,
+        "request_id": request_id,
+        "user_turn_id": user_turn["id"],
+        "assistant_turn_id": assistant_turn["id"] if assistant_turn else None,
+        "user_created_at": user_turn["created_at"],
+        "assistant_created_at": assistant_turn["created_at"] if assistant_turn else None,
+        "prompt_version": scenario.get("prompt_version"),
+        "git_commit": commit,
+    }
+
+    dump_json(run_dir / "metadata.json", metadata)
+    (run_dir / "user_request.txt").write_text(user_request, encoding="utf-8")
+    (run_dir / "assistant_reply.txt").write_text(assistant_reply, encoding="utf-8")
+    dump_json(run_dir / "tool_trace.json", [dict(row) for row in tool_calls])
+    dump_json(run_dir / "doc_binding.json", dict(doc_binding) if doc_binding else {})
+    dump_json(run_dir / "uploaded_file.json", dict(uploaded_file) if uploaded_file else {})
+    dump_json(run_dir / "attachment.json", attachment_payload)
+    dump_json(run_dir / "rag_query.json", rag_query_payload)
+    (run_dir / "written_doc_content.md").write_text(str(write_payload["args"].get("content", "") or ""), encoding="utf-8")
+    dump_json(run_dir / "flow_trace.json", build_flow_trace(metadata, flow_rows))
+    contract_results = collect_contract_results()
+    dump_json(run_dir / "contract_results.json", contract_results)
+    flow_results = collect_flow_results(flow_rows)
+    dump_json(run_dir / "flow_results.json", flow_results)
+
+    gate_results: list[dict[str, Any]] = []
+    gate_results.append(
+        {
+            "id": "kb_action_contracts_must_pass",
+            "scope": "global",
+            "description": "knowledge base action contracts must return stable structures.",
+            "passed": contract_results["passed"],
+            "reason": (
+                "knowledge base action contracts passed."
+                if contract_results["passed"]
+                else "; ".join(item["reason"] for item in contract_results["checks"] if not item["passed"])
+            ),
+        }
+    )
+    gate_results.append(
+        {
+            "id": "flow_checks_must_pass",
+            "scope": "global",
+            "description": "flow trace must contain route, stop reason, and self-check before tool execution.",
+            "passed": flow_results["passed"],
+            "reason": (
+                "flow checks passed."
+                if flow_results["passed"]
+                else "; ".join(item["reason"] for item in flow_results["checks"] if not item["passed"])
+            ),
+        }
+    )
+    if stdio_boot["checks"]:
+        failed_servers = [item["server_name"] for item in stdio_boot["checks"] if not item["passed"]]
+        gate_results.append(
+            {
+                "id": "required_stdio_mcp_must_initialize",
+                "scope": "global",
+                "description": global_gate_catalog.get(
+                    "required_stdio_mcp_must_initialize",
+                    "所有 required stdio MCP server 必须先完成 initialize。",
+                ),
+                "passed": stdio_boot["passed"],
+                "reason": (
+                    "所有 required stdio MCP server 已成功 initialize。"
+                    if stdio_boot["passed"]
+                    else f"以下 required stdio MCP server 初始化失败：{failed_servers}"
+                ),
+            }
+        )
+    for gate_id in scenario.get("global_gates", []):
+        passed, reason = evaluate_global_gate(
+            gate_id,
+            assistant_reply,
+            tool_calls,
+            doc_binding,
+            user_request,
+            flow_rows,
+        )
+        gate_results.append(
+            {
+                "id": gate_id,
+                "scope": "global",
+                "description": global_gate_catalog.get(gate_id, ""),
+                "passed": passed,
+                "reason": reason,
+            }
+        )
+
+    for gate_id in scenario_gate_catalog:
+        passed, reason = evaluate_scenario_gate(
+            gate_id,
+            assistant_reply,
+            tool_calls,
+            user_request,
+            uploaded_file,
+            flow_rows,
+            attachment_payload,
+        )
+        gate_results.append(
+            {
+                "id": gate_id,
+                "scope": "scenario",
+                "description": scenario_gate_catalog.get(gate_id, ""),
+                "passed": passed,
+                "reason": reason,
+            }
+        )
+
+    layer_checks = run_layer_checks(PROJECT_ROOT)
+    dump_json(RUNS_DIR / args.run_id / "layer_checks.json", layer_checks)
+
+    failed_gate_ids = [item["id"] for item in gate_results if not item["passed"]]
+    evaluator = {
+        "passed": all(item["passed"] for item in gate_results) and layer_checks.get("passed", True),
+        "failed_checks": failed_gate_ids,
+        "reasons": [item["reason"] for item in gate_results if not item["passed"]],
+        "suggested_fix_layer": suggested_fix_layers(failed_gate_ids, layer_checks.get("passed", True)),
+        "gate_results": gate_results,
+        "layer_checks_passed": layer_checks.get("passed", True),
+    }
+    dump_json(run_dir / "gate_results.json", evaluator)
+    dump_json(run_dir / "evaluator.json", evaluator)
+    write_run_summary(args.run_id, args.scenario_id, evaluator, layer_checks, contract_results, flow_results)
+
+    print(f"Saved run artifacts to: {run_dir}")
+    print(f"Overall passed: {evaluator['passed']}")
+    if evaluator["failed_checks"]:
+        print("Failed checks:")
+        for check_id in evaluator["failed_checks"]:
+            print(f"- {check_id}")
+
+
+if __name__ == "__main__":
+    main()

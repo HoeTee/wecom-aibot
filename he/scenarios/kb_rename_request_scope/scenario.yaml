@@ -1,0 +1,12 @@
+id: kb_rename_request_scope
+goal: 当用户询问知识库文件能否改名时，系统应保持在知识库文件语义内，不应误转成企微文档标题修改。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+scenario_gates:
+  - id: kb_rename_request_must_stay_in_knowledge_base_scope
+    description: 知识库改名请求必须保持在知识库文件语义内。
+artifact_focus:
+  - assistant_reply
+  - flow_trace
+  - evaluator

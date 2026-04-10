@@ -1,312 +1,181 @@
 # wecom-aibot
 
-This project has two runtime processes:
+面向企业微信文档工作流的 agent。
 
-1. `backend/app.py`
-   - Flask backend
-   - calls the LLM
-   - can load zero, one, or many MCP servers through an MCP host
-2. `gateway/long_connection.ts`
-   - WeCom long connection gateway
-   - receives WeCom messages and forwards them to the backend
+它做三件事：
 
-## Layout
+1. 接收用户消息或文件
+2. 查询知识库、RAG 和文档能力
+3. 创建或编辑企业微信文档，并用 `he/` 做回归验证
+
+## 架构
+
+这不是目录图，而是运行链路。
 
 ```text
-backend/
-  app.py
-  agent.py
-  memory.py
-  mcp_client/
-    config.py
-    connection.py
-    host.py
-    mcp_logger.py
-    mcp_minimal.py
-config/
-  mcp_servers.example.json
-data/
-  memory.sqlite3  # runtime-generated
-gateway/
-  long_connection.ts
-scripts/
-  mcp_test.py
+原则层
+  README.md / AGENTS.md / docs/*.md
+    └─ 定义规则、边界、流程和检查项
+
+运行时层
+  用户输入
+    ↓
+  gateway
+    ↓
+  entry      receives
+    ↓
+  flow       orchestrates
+    ├─ 读 policy 规则
+    ├─ 读 state 事实
+    └─ 选择 caps 动作
+           ↓
+        runtime   dispatches
+           ↓
+        tools     execute
+           ↓
+        企业微信 / 本地知识库 / RAG
+
+验证层
+  he
+    └─ evaluates
 ```
 
-## Verified environment
+运行时层级和模块关系：
 
-- Node.js `v24.11.1`
-- Python `3.11.9`
+```text
+entry
+  负责接收输入和返回输出
 
-## Install
+flow
+  负责编排动作顺序，不直接持有大量业务细节
 
-Python:
+policy
+  负责规则和边界，例如是否必须确认、哪些动作禁止直接执行
+
+state
+  负责会话事实，例如当前文档绑定、最近上传文件、flow trace
+
+caps
+  定义动作边界，例如：
+  - kb.list
+  - kb.rename
+  - doc.read
+  - doc.write
+  - rag.search
+
+runtime
+  负责把动作分发到 MCP 或 CLI
+
+tools
+  负责真正执行
+
+he
+  负责 contract / flow / scenario 检查
+```
+
+当前能力来源：
+
+```text
+kb.*
+  主要是本地知识库文件动作
+  由 runtime 分发到本地 tools 执行
+
+doc.*
+  主要通过企业微信文档 MCP 调用
+
+smartsheet.*
+  主要通过企业微信智能表格 MCP 调用
+
+rag.*
+  当前通过本地 RAG MCP 调用
+```
+
+也就是说：
+
+```text
+agent / flow 不直接碰底层实现
+而是先选动作，再由 runtime 决定这个动作最终走 MCP 还是本地 tools
+```
+
+## 仓库结构
+
+```text
+wecom-aibot/
+  README.md
+  AGENTS.md
+
+  docs/            # 原则层
+  backend/         # 运行时层
+  he/              # 独立 HE 层
+
+  gateway/
+  knowledge_base/
+  prompts/
+  scripts/
+  config/
+  data/
+```
+
+知识库约定：
+
+- 所有知识库 PDF 直接放在 `knowledge_base/` 根目录
+- 不再使用 `papers/`、`uploads/` 子目录
+- 上传文件通过文件名前缀 `upload__` 区分
+
+## 快速启动
+
+环境要求：
+
+- Python 3.11+
+- Node.js 20+
+
+Windows:
 
 ```powershell
 .venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-Node.js:
-
-```powershell
 npm install
-```
-
-## Environment configuration
-
-Copy `.env.example` to `.env`, then fill in:
-
-- `LLM_API_KEY`
-- `LLM_BASE_URL`
-- `LLM_MODEL` (or legacy `LLM_NAME`)
-- `WECOM_BOT_ID`
-- `WECOM_BOT_SECRET`
-
-Optional:
-
-- `BACKEND_BASE_URL` if backend is not running on `http://127.0.0.1:5000`
-- `MCP_SERVERS_CONFIG` to load one or more MCP servers through a JSON config file
-- `MCP_SERVER_URL` as a legacy fallback for a single server only
-
-Security note:
-
-- `config/mcp_servers.json` is a local-only file and must not be committed because it may contain secrets such as API keys
-- runtime artifacts under `data/`, `persist/`, and `manifest/` must not be committed
-
-If `WECOM_BOT_ID` or `WECOM_BOT_SECRET` is missing, `npm run gateway` will fail at startup.
-
-The backend session memory uses a local SQLite file at `data/memory.sqlite3`.
-No extra memory-specific environment variable is required.
-
-## MCP host overview
-
-The backend no longer assumes a single MCP server.
-
-It now loads server definitions into an MCP host that:
-
-- connects to multiple servers
-- supports remote `streamable_http` and `sse` transports
-- supports local `stdio` servers through explicit `command + args`
-- exposes all tools to the model in standard OpenAI function-calling shape
-- namespaces exposed tool names as `<tool_prefix>__<remote_tool_name>`
-- routes tool calls back to the correct server by exposed tool name
-
-Example:
-
-- server name: `wecom`
-- remote tool name: `create_doc`
-- exposed tool name to the model: `wecom__create_doc`
-
-Request flow:
-
-```text
-User message
-  -> Agent
-  -> OpenAI chat.completions with host-exposed tools
-  -> model selects tool name like wecom__create_doc
-  -> MCPHost looks up route for wecom__create_doc
-  -> MCPServerConnection for server "wecom"
-  -> remote MCP tool "create_doc"
-  -> tool result returns to MCPHost
-  -> Agent appends tool message
-  -> model produces final answer
-```
-
-## MCP server config
-
-Copy `config/mcp_servers.example.json` to `config/mcp_servers.json`, then set:
-
-- `name`: unique server identifier inside the host
-- `transport`: one of `streamable_http`, `sse`, or `stdio`
-- `tool_prefix`: optional prefix used when exposing tools to the model. If omitted, it defaults to a normalized form of `name`
-- `required`: whether backend startup should fail if this server cannot connect
-
-Transport-specific fields:
-
-- `streamable_http` or `sse`: set `url`
-- `stdio`: set `command`, optional `args`, optional `cwd`, optional `env`
-
-Example:
-
-```json
-{
-  "servers": [
-    {
-      "name": "wecom",
-      "tool_prefix": "wecom",
-      "transport": "streamable_http",
-      "url": "http://127.0.0.1:8000/mcp",
-      "required": false
-    },
-    {
-      "name": "filesystem",
-      "tool_prefix": "fs",
-      "transport": "stdio",
-      "command": "npx.cmd",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\work"],
-      "required": false
-    },
-    {
-      "name": "local_python_server",
-      "tool_prefix": "localpy",
-      "transport": "stdio",
-      "command": ".venv\\Scripts\\python.exe",
-      "args": ["-m", "my_mcp_server"],
-      "cwd": ".",
-      "env": {
-        "MY_SERVER_MODE": "dev"
-      },
-      "required": false
-    }
-  ]
-}
-```
-
-## Why `command + args` for local servers
-
-Local MCP servers are not inferred from file extension anymore.
-
-Instead of guessing from `.py` or `.js`, the host launches local servers explicitly with:
-
-- `command`: executable to run
-- `args`: argv list passed to that executable
-
-That supports:
-
-- Python scripts
-- Python modules via `-m`
-- Node entrypoints
-- `npx`-based MCP servers
-- native binaries
-
-Examples:
-
-```json
-{
-  "name": "py_script",
-  "tool_prefix": "pyscript",
-  "transport": "stdio",
-  "command": ".venv\\Scripts\\python.exe",
-  "args": ["servers\\demo_server.py"]
-}
-```
-
-```json
-{
-  "name": "py_module",
-  "tool_prefix": "pymodule",
-  "transport": "stdio",
-  "command": ".venv\\Scripts\\python.exe",
-  "args": ["-m", "demo_server"]
-}
-```
-
-```json
-{
-  "name": "node_server",
-  "tool_prefix": "node",
-  "transport": "stdio",
-  "command": "node",
-  "args": ["dist\\server.js"]
-}
-```
-
-## Legacy fallback
-
-`MCP_SERVER_URL` still works for compatibility with the older single-server path.
-
-Legacy behavior:
-
-- `http://...` or `https://...` -> treated as `streamable_http`
-- `*.py` -> treated as `stdio` with `python <file>`
-- `*.js` -> treated as `stdio` with `node <file>`
-
-New setups should prefer `MCP_SERVERS_CONFIG`.
-
-## Run
-
-Terminal 1:
-
-```powershell
+Copy-Item .env.example .env
+Copy-Item config\mcp_servers.example.json config\mcp_servers.json
 .venv\Scripts\python.exe -m backend.app
-```
-
-Terminal 2:
-
-```powershell
 npm run gateway
 ```
 
-## Session memory
+macOS / Linux:
 
-The backend now keeps a small local memory for each WeCom conversation.
-
-Storage:
-
-- `data/memory.sqlite3`
-
-Session identity:
-
-- single chat -> `dm:{userId}`
-- group chat -> `group:{chatId}`
-
-Stored memory:
-
-- recent dialogue turns
-- recent MCP tool calls
-- recently bound WeCom documents
-
-For each bound document, the backend persists the document triple:
-
-- `doc_id`
-- `doc_url`
-- `doc_name`
-
-This is primarily used for the WeCom document workflow. If the user later says things like "modify the last document" or "update that weekly report", the agent can look up the current session's recent document bindings and prefer the recorded `doc_id`.
-
-Current read window:
-
-- up to 10 recent dialogue turns from the last 7 days
-- up to 6 recent MCP calls from the last 30 days
-- up to 5 recent bound documents from the last 30 days
-
-The memory database is created automatically on backend startup.
-
-## MCP connectivity tests
-
-After setting `MCP_SERVERS_CONFIG` in `.env`:
-
-```powershell
-.venv\Scripts\python.exe -m scripts.mcp_test
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+npm install
+cp .env.example .env
+cp config/mcp_servers.example.json config/mcp_servers.json
+.venv/bin/python -m backend.app
+npm run gateway
 ```
 
-That script:
+健康检查：
 
-- loads the configured servers
-- connects the MCP host
-- prints exposed tools
-- prints the host routing table
-- closes all server connections
-
-If you only have the old single-server environment variable set, the same script still works through the legacy fallback:
+Windows:
 
 ```powershell
-.venv\Scripts\python.exe -m scripts.mcp_test
+Invoke-WebRequest http://127.0.0.1:5000/health
 ```
 
-## Current backend behavior
+macOS / Linux:
 
-For each chat request, the backend:
+```bash
+curl http://127.0.0.1:5000/health
+```
 
-1. builds a session ID from the incoming WeCom chat metadata
-2. loads recent session memory from `data/memory.sqlite3`
-3. loads MCP server config from environment
-4. constructs an `MCPHost`
-5. connects all configured servers
-6. passes both the aggregated tools and the session memory context into the agent
-7. routes tool calls back to the correct MCP server by exposed tool name
-8. stores recent tool usage and document bindings such as `doc_id`, `doc_url`, and `doc_name`
-9. stores the user turn and assistant reply in session memory
-10. cleans up all MCP connections in `finally`
+## 详细文档
 
-This keeps host lifecycle simple while still giving the agent short-term conversation and document memory across requests.
+更细的内容不要放在 README，去这里看：
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/ROUTING_RULES.md](docs/ROUTING_RULES.md)
+- [docs/FLOWS.md](docs/FLOWS.md)
+- [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md)
+- [docs/CHECKS.md](docs/CHECKS.md)
+- [docs/EVALS.md](docs/EVALS.md)
+- [docs/MEMORY.md](docs/MEMORY.md)
+- [he/README.md](he/README.md)
