@@ -73,6 +73,30 @@ he
   负责 contract / flow / scenario 检查
 ```
 
+当前能力来源：
+
+```text
+kb.*
+  主要是本地知识库文件动作
+  由 runtime 分发到本地 tools 执行
+
+doc.*
+  主要通过企业微信文档 MCP 调用
+
+smartsheet.*
+  主要通过企业微信智能表格 MCP 调用
+
+rag.*
+  当前通过本地 RAG MCP 调用
+```
+
+也就是说：
+
+```text
+agent / flow 不直接碰底层实现
+而是先选动作，再由 runtime 决定这个动作最终走 MCP 还是本地 tools
+```
+
 ## 仓库结构
 
 ```text
