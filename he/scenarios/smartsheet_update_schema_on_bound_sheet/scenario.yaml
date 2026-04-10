@@ -1,0 +1,16 @@
+id: smartsheet_update_schema_on_bound_sheet
+goal: 用户要求在当前智能表格里继续整理知识库内容时，系统必须复用当前表，而不是重新创建新表。
+prompt_version: assistant_v1
+turns:
+  - turns/turn_1.txt
+global_gates:
+  - agent_intent_packet_must_exist_before_tool_selection
+  - tool_execution_must_end_with_reply_or_explicit_error
+  - smartsheet_intent_must_not_call_rag
+scenario_gates:
+  - id: smartsheet_update_schema_must_reuse_bound_doc
+    description: 智能表格结构更新必须复用当前表，不得重新调用 create_doc。
+artifact_focus:
+  - assistant_reply
+  - flow_trace
+  - evaluator

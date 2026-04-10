@@ -325,6 +325,7 @@ python scripts/cleanup_artifacts.py
 已新增智能表格回归场景：
 
 - `smartsheet_create_from_kb`
+- `smartsheet_update_schema_on_bound_sheet`
 
 它主要检查：
 
@@ -332,3 +333,4 @@ python scripts/cleanup_artifacts.py
 - 不得退化成知识库列表
 - 不得错误调用 `rag.*`
 - 如果企业微信文档授权过期，必须快速失败并明确提示
+- 智能表格结构更新必须复用当前表，不得重新调用 `create_doc`

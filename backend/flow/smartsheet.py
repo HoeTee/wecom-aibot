@@ -21,6 +21,7 @@ from backend.policy.smartsheet import (
     is_authorization_expired,
 )
 from backend.runtime import MCPHost
+from backend.state.store import current_bound_doc
 
 
 def _build_result(
@@ -74,6 +75,16 @@ def _build_record_values(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _intent_name(intent_hint: dict[str, Any] | None) -> str:
+    if not isinstance(intent_hint, dict):
+        return ""
+    return str(intent_hint.get("intent") or "").strip()
+
+
+def _should_reuse_existing_smartsheet(intent_name: str) -> bool:
+    return intent_name in {"smartsheet.update_schema", "smartsheet.add_records"}
+
+
 async def handle_smartsheet_request(
     session_id: str,
     request_id: str,
@@ -82,7 +93,7 @@ async def handle_smartsheet_request(
     host: MCPHost | None,
     intent_hint: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    del session_id, request_id
+    del request_id
 
     if not detect_smartsheet_request(content, intent_hint):
         return None
@@ -101,43 +112,71 @@ async def handle_smartsheet_request(
 
     source_scope = infer_smartsheet_source_scope(content, intent_hint)
     doc_name = infer_smartsheet_name(content, intent_hint)
+    intent_name = _intent_name(intent_hint)
     selected_target = build_selected_target("smartsheet", None, doc_name)
     tool_calls: list[dict[str, Any]] = []
+    doc_id: str | None = None
+    doc_url: str | None = None
 
-    create_payload = await create_smartsheet(host, doc_name)
-    tool_calls.append(_tool_call_entry(create_payload))
-    doc_id = str(create_payload.get("doc_id") or "").strip() or None
-    doc_url = str(create_payload.get("doc_url") or "").strip() or None
-    if doc_id:
-        selected_target = build_selected_target("smartsheet", doc_id, doc_name)
+    if _should_reuse_existing_smartsheet(intent_name):
+        bound_doc = current_bound_doc(session_id)
+        if bound_doc:
+            doc_id = str(bound_doc.get("doc_id") or "").strip() or None
+            doc_url = str(bound_doc.get("doc_url") or "").strip() or None
+            doc_name = str(bound_doc.get("doc_name") or doc_name or "").strip() or doc_name
+            if doc_id:
+                selected_target = build_selected_target("smartsheet", doc_id, doc_name)
 
-    if is_authorization_expired(create_payload):
-        return _build_result(
-            reply=build_smartsheet_auth_expired_reply(create_payload),
-            route_detail="create_auth_expired",
-            reasons=["smartsheet_requested", "authorization_expired"],
-            selected_target=selected_target,
-            reply_type="error",
-            stop_code="tool_error",
-            stop_detail="authorization_expired",
-            tool_calls=tool_calls,
-            guard_hits=[{"code": "authorization_expired", "detail": "wecom_docs"}],
-        )
+        if not doc_id:
+            return _build_result(
+                reply="我还没有找到当前可继续编辑的智能表格。请先创建一张智能表格，或者明确告诉我要操作哪一张表。",
+                route_detail="missing_bound_smartsheet",
+                reasons=["smartsheet_requested", "bound_smartsheet_missing"],
+                selected_target=build_selected_target(
+                    "smartsheet",
+                    None,
+                    doc_name,
+                    clear_reason="bound_smartsheet_missing",
+                ),
+                reply_type="clarify",
+                stop_code="clarify_required",
+                stop_detail="bound_smartsheet_missing",
+            )
+    else:
+        create_payload = await create_smartsheet(host, doc_name)
+        tool_calls.append(_tool_call_entry(create_payload))
+        doc_id = str(create_payload.get("doc_id") or "").strip() or None
+        doc_url = str(create_payload.get("doc_url") or "").strip() or None
+        if doc_id:
+            selected_target = build_selected_target("smartsheet", doc_id, doc_name)
 
-    if not doc_id:
-        return _build_result(
-            reply=build_smartsheet_partial_reply(doc_name, reason="创建后未返回 doc_id。", doc_url=doc_url),
-            route_detail="create_missing_doc_id",
-            reasons=["smartsheet_requested", "doc_id_missing"],
-            selected_target=selected_target,
-            reply_type="error",
-            stop_code="tool_error",
-            stop_detail="doc_id_missing",
-            tool_calls=tool_calls,
-        )
+        if is_authorization_expired(create_payload):
+            return _build_result(
+                reply=build_smartsheet_auth_expired_reply(create_payload),
+                route_detail="create_auth_expired",
+                reasons=["smartsheet_requested", "authorization_expired"],
+                selected_target=selected_target,
+                reply_type="error",
+                stop_code="tool_error",
+                stop_detail="authorization_expired",
+                tool_calls=tool_calls,
+                guard_hits=[{"code": "authorization_expired", "detail": "wecom_docs"}],
+            )
+
+        if not doc_id:
+            return _build_result(
+                reply=build_smartsheet_partial_reply(doc_name, reason="创建后未返回 doc_id。", doc_url=doc_url),
+                route_detail="create_missing_doc_id",
+                reasons=["smartsheet_requested", "doc_id_missing"],
+                selected_target=selected_target,
+                reply_type="error",
+                stop_code="tool_error",
+                stop_detail="doc_id_missing",
+                tool_calls=tool_calls,
+            )
 
     records = list_pdf_records() if source_scope == "knowledge_base" else []
-    if not records:
+    if not records and not _should_reuse_existing_smartsheet(intent_name):
         return _build_result(
             reply=build_smartsheet_success_reply(doc_name, row_count=0, doc_url=doc_url),
             route_detail="create_smartsheet_only",
@@ -209,33 +248,43 @@ async def handle_smartsheet_request(
             guard_hits=[{"code": "authorization_expired", "detail": "wecom_docs"}],
         )
 
-    add_records_payload = await add_smartsheet_records(
-        host,
-        doc_id=doc_id,
-        sheet_id=sheet_id,
-        records=[{"values": _build_record_values(record)} for record in records],
-    )
-    tool_calls.append(_tool_call_entry(add_records_payload))
-    if is_authorization_expired(add_records_payload):
-        return _build_result(
-            reply=build_smartsheet_auth_expired_reply(add_records_payload),
-            route_detail="add_records_auth_expired",
-            reasons=["smartsheet_requested", "authorization_expired"],
-            selected_target=selected_target,
-            reply_type="error",
-            stop_code="tool_error",
-            stop_detail="authorization_expired",
-            tool_calls=tool_calls,
-            guard_hits=[{"code": "authorization_expired", "detail": "wecom_docs"}],
+    if records:
+        add_records_payload = await add_smartsheet_records(
+            host,
+            doc_id=doc_id,
+            sheet_id=sheet_id,
+            records=[{"values": _build_record_values(record)} for record in records],
         )
+        tool_calls.append(_tool_call_entry(add_records_payload))
+        if is_authorization_expired(add_records_payload):
+            return _build_result(
+                reply=build_smartsheet_auth_expired_reply(add_records_payload),
+                route_detail="add_records_auth_expired",
+                reasons=["smartsheet_requested", "authorization_expired"],
+                selected_target=selected_target,
+                reply_type="error",
+                stop_code="tool_error",
+                stop_detail="authorization_expired",
+                tool_calls=tool_calls,
+                guard_hits=[{"code": "authorization_expired", "detail": "wecom_docs"}],
+            )
+
+    route_detail = "create_from_knowledge_base"
+    reasons = ["smartsheet_requested", "knowledge_base_as_source"]
+    stop_detail = "records_added" if records else "schema_updated"
+    if _should_reuse_existing_smartsheet(intent_name):
+        route_detail = "update_schema_on_bound_smartsheet" if records else "update_schema_on_bound_smartsheet_only"
+        reasons = ["smartsheet_requested", "bound_smartsheet_reused"]
+        if records:
+            reasons.append("knowledge_base_as_source")
 
     return _build_result(
         reply=build_smartsheet_success_reply(doc_name, row_count=len(records), doc_url=doc_url),
-        route_detail="create_from_knowledge_base",
-        reasons=["smartsheet_requested", "knowledge_base_as_source"],
+        route_detail=route_detail,
+        reasons=reasons,
         selected_target=selected_target,
         reply_type="smartsheet_created",
         stop_code="smartsheet_created",
-        stop_detail="records_added",
+        stop_detail=stop_detail,
         tool_calls=tool_calls,
     )

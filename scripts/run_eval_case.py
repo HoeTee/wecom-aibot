@@ -729,6 +729,7 @@ def evaluate_scenario_gate(
     content = str(write_payload["args"].get("content", "") or "")
     tool_names = [row["tool_name"] for row in tool_calls]
     route_selected = latest_route_selected(flow_rows)
+    intent_packet = latest_intent_packet(flow_rows)
 
     if gate_id == "fresh_regenerate_must_not_reuse_existing_doc":
         if "重新生成" in user_request and "文档" in user_request:
@@ -909,6 +910,22 @@ def evaluate_scenario_gate(
         if any(token in assistant_reply.lower() for token in ("authorization expired", "授权")):
             return True, "智能表格授权过期时已快速失败并明确提示。"
         return False, "智能表格授权过期时没有明确提示授权问题。"
+
+    if gate_id == "smartsheet_update_schema_must_reuse_bound_doc":
+        intent = str(intent_packet.get("intent") or "").strip()
+        if intent != "smartsheet.update_schema":
+            return True, "当前请求不属于智能表格结构更新。"
+        if route_selected.get("code") != "smartsheet":
+            return False, "智能表格结构更新请求没有进入 smartsheet 路由。"
+        create_doc_tools = [name for name in tool_names if name.endswith("create_doc")]
+        if create_doc_tools:
+            return False, f"智能表格结构更新错误地重新创建了表：{create_doc_tools}"
+        if not any(
+            name.endswith("smartsheet_add_fields") or name.endswith("smartsheet_add_records")
+            for name in tool_names
+        ):
+            return False, "智能表格结构更新没有继续执行字段或记录写入。"
+        return True, "智能表格结构更新复用了当前表，没有重新创建。"
 
     if gate_id == "doc_merge_must_confirm_target_source_action":
         required_tokens = ("目标文档", "来源文档", "动作")

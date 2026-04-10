@@ -85,9 +85,31 @@ def _extract_sheet_id(payload: dict[str, Any]) -> str | None:
         if value:
             return str(value).strip()
 
+    properties = payload.get("properties")
+    if isinstance(properties, dict):
+        for key in ("sheet_id", "sheetId"):
+            value = properties.get(key)
+            if value:
+                return str(value).strip()
+
     sheets = payload.get("sheets")
     if isinstance(sheets, list) and sheets:
         first = sheets[0]
+        if isinstance(first, dict):
+            for key in ("sheet_id", "sheetId"):
+                value = first.get(key)
+                if value:
+                    return str(value).strip()
+            properties = first.get("properties")
+            if isinstance(properties, dict):
+                for key in ("sheet_id", "sheetId"):
+                    value = properties.get(key)
+                    if value:
+                        return str(value).strip()
+
+    sheet_list = payload.get("sheet_list")
+    if isinstance(sheet_list, list) and sheet_list:
+        first = sheet_list[0]
         if isinstance(first, dict):
             for key in ("sheet_id", "sheetId"):
                 value = first.get(key)
@@ -106,9 +128,23 @@ def _extract_sheet_id(payload: dict[str, Any]) -> str | None:
             value = data.get(key)
             if value:
                 return str(value).strip()
+        nested_properties = data.get("properties")
+        if isinstance(nested_properties, dict):
+            for key in ("sheet_id", "sheetId"):
+                value = nested_properties.get(key)
+                if value:
+                    return str(value).strip()
         nested_sheets = data.get("sheets")
         if isinstance(nested_sheets, list) and nested_sheets:
             first = nested_sheets[0]
+            if isinstance(first, dict):
+                for key in ("sheet_id", "sheetId"):
+                    value = first.get(key)
+                    if value:
+                        return str(value).strip()
+        nested_sheet_list = data.get("sheet_list")
+        if isinstance(nested_sheet_list, list) and nested_sheet_list:
+            first = nested_sheet_list[0]
             if isinstance(first, dict):
                 for key in ("sheet_id", "sheetId"):
                     value = first.get(key)
