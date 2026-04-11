@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     top_p: float = Field(0.01, alias="TOP_P")
     seed: int = Field(42, alias="SEED")
 
-    max_tool_calls: int = Field(10, alias="MAX_TOOL_CALLS")
+    max_tool_calls: int = Field(0, alias="MAX_TOOL_CALLS")
     max_context_tokens: int = Field(100000, alias="MAX_CONTEXT_TOKENS")
     max_result_tokens: int = Field(5000, alias="MAX_RESULT_TOKENS")
     routing_timeout_seconds: float = Field(15.0, alias="ROUTING_TIMEOUT_SECONDS")
@@ -359,7 +359,7 @@ class Agent:
             ):
                 target_ok = False
                 problems.append(f"{function_name}:missing_doc_id")
-        sequence_ok = len(tool_calls) <= self.max_tool_calls
+        sequence_ok = self.max_tool_calls <= 0 or len(tool_calls) <= self.max_tool_calls
         for tool_call in tool_calls:
             function_name = tool_call.function.name
             lowered = function_name.lower()
@@ -506,7 +506,7 @@ class Agent:
         self.tool_call_count += len(tool_calls)
         self._log(f"Processing {len(tool_calls)} tool calls (total: {self.tool_call_count})")
 
-        if self.tool_call_count > self.max_tool_calls:
+        if self.max_tool_calls > 0 and self.tool_call_count > self.max_tool_calls:
             self._emit_flow(
                 "guard_hit",
                 {
