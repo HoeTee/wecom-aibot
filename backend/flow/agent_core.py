@@ -16,6 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from backend.policy.document import validate_doc_tool_arguments
 from backend.policy.rag import needs_rag_query_rewrite, rewrite_rag_query
+from backend.runtime.local_tools import execute_local_agent_tool, is_local_agent_tool_name
 
 
 class Settings(BaseSettings):
@@ -42,7 +43,7 @@ class Settings(BaseSettings):
     max_context_tokens: int = Field(100000, alias="MAX_CONTEXT_TOKENS")
     max_result_tokens: int = Field(5000, alias="MAX_RESULT_TOKENS")
     routing_timeout_seconds: float = Field(15.0, alias="ROUTING_TIMEOUT_SECONDS")
-    agent_timeout_seconds: float = Field(60.0, alias="AGENT_TIMEOUT_SECONDS")
+    agent_timeout_seconds: float = Field(180.0, alias="AGENT_TIMEOUT_SECONDS")
 
 
 INTENT_PACKET_SYSTEM_PROMPT = """
@@ -234,6 +235,7 @@ class Agent:
         self.intent_packet = dict(intent_packet or {})
         self.on_tool_result = on_tool_result
         self.on_flow_event = on_flow_event
+        self.prepared_attachment: dict[str, Any] | None = None
 
         self.token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self.tool_call_count = 0
@@ -324,9 +326,6 @@ class Agent:
         params_ok = True
         need_confirm = False
         risk = "low"
-        intent_family = str(self.intent_packet.get("intent_family") or "").strip()
-        intent = str(self.intent_packet.get("intent") or "").strip()
-
         for tool_call in tool_calls:
             function_name = tool_call.function.name
             tool_names.append(function_name)
@@ -360,24 +359,15 @@ class Agent:
             ):
                 target_ok = False
                 problems.append(f"{function_name}:missing_doc_id")
-
-        lowered_tool_names = [name.lower() for name in tool_names]
         sequence_ok = len(tool_calls) <= self.max_tool_calls
-        if intent_family == "smartsheet":
-            if any(name.endswith("llamaindex_rag_query") for name in lowered_tool_names):
+        for tool_call in tool_calls:
+            function_name = tool_call.function.name
+            lowered = function_name.lower()
+            args_dict = self._parse_tool_arguments(tool_call.function.arguments, function_name) or {}
+            if lowered in {"kb__rename_file", "kb__delete_file"} and args_dict.get("confirmed") is not True:
                 params_ok = False
                 risk = "high"
-                problems.append("smartsheet_intent:routing_to_rag_forbidden")
-            if lowered_tool_names and not any(
-                ("create_doc" in name or "smartsheet_" in name) for name in lowered_tool_names
-            ):
-                sequence_ok = False
-                problems.append("smartsheet_intent:tool_family_mismatch")
-        elif intent_family == "knowledge_base" and intent in {"kb.rename", "kb.delete", "kb.export"}:
-            if any(name.endswith("llamaindex_rag_query") for name in lowered_tool_names):
-                params_ok = False
-                risk = "high"
-                problems.append("knowledge_base_file_management:routing_to_rag_forbidden")
+                problems.append(f"{function_name}:confirmed_flag_required")
 
         return {
             "tool_names": tool_names,
@@ -451,24 +441,35 @@ class Agent:
             )
             return validation_error
 
-        if not self.mcp_client:
-            result_str = f"No MCP client for tool {function_name}"
-            self._emit_flow(
-                "tool_called",
-                {
-                    "tool_name": function_name,
-                    "args_summary": self._summarize_args(call_args),
-                    "result_summary": result_str,
-                    "result_status": "failure",
-                },
+        if is_local_agent_tool_name(function_name):
+            local_result = await execute_local_agent_tool(
+                function_name,
+                call_args,
+                host=self.mcp_client,
             )
-            return result_str
-
-        if call_args == args_dict:
-            tool_msg = await self.mcp_client.tool_message_from_call(tool_call)
-            result = tool_msg["content"]
+            attachment = local_result.get("attachment")
+            if isinstance(attachment, dict):
+                self.prepared_attachment = attachment
+            result = local_result.get("content") or ""
         else:
-            result = await self.mcp_client.call_tool(function_name, call_args)
+            if not self.mcp_client:
+                result_str = f"No MCP client for tool {function_name}"
+                self._emit_flow(
+                    "tool_called",
+                    {
+                        "tool_name": function_name,
+                        "args_summary": self._summarize_args(call_args),
+                        "result_summary": result_str,
+                        "result_status": "failure",
+                    },
+                )
+                return result_str
+
+            if call_args == args_dict:
+                tool_msg = await self.mcp_client.tool_message_from_call(tool_call)
+                result = tool_msg["content"]
+            else:
+                result = await self.mcp_client.call_tool(function_name, call_args)
 
         result_str = str(result)
         if self.on_tool_result:
@@ -559,7 +560,7 @@ class Agent:
                 seed=self.settings.seed,
                 messages=self.messages,
                 tools=self.tools if self.tools else None,
-                tool_choice="auto" if self.tools else None,
+                tool_choice="required" if self.tools and self.tool_call_count == 0 else ("auto" if self.tools else None),
             )
 
             response_message = completion.choices[0].message

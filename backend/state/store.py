@@ -5,6 +5,7 @@ import re
 import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 
@@ -16,6 +17,8 @@ FLOW_LOG_PATH = FLOW_LOG_DIR / "flow_runtime.log"
 DOC_ID_PATTERN = re.compile(r'(?i)(?:docid|doc_id)\b["\']?\s*[:=]\s*["\']?([A-Za-z0-9_-]+)')
 DOC_NAME_PATTERN = re.compile(r'(?i)(?:doc_name|docname)\b["\']?\s*[:=]\s*["\']?([^\n,"\'}]+)')
 DOC_URL_PATTERN = re.compile(r"(https?://[^\s'\"]+)")
+DOC_URL_HOSTS = {"doc.weixin.qq.com"}
+DOC_URL_PATH_PREFIXES = ("/doc/", "/smartsheet/")
 
 
 def _connect() -> sqlite3.Connection:
@@ -59,6 +62,69 @@ def _extract_with_pattern(pattern: re.Pattern[str], text: str) -> str | None:
     if not match:
         return None
     return match.group(1).strip().strip('"').strip("'")
+
+
+def _parse_json_payload(text: str) -> dict[str, Any]:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return {}
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        start = raw_text.find("{")
+        end = raw_text.rfind("}") + 1
+        if start == -1 or end <= start:
+            return {}
+        try:
+            payload = json.loads(raw_text[start:end])
+        except json.JSONDecodeError:
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _normalize_doc_url(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.netloc.lower() not in DOC_URL_HOSTS:
+        return None
+    if not parsed.path.startswith(DOC_URL_PATH_PREFIXES):
+        return None
+    return text
+
+
+def _extract_doc_url_from_payload(payload: dict[str, Any]) -> str | None:
+    for key in ("doc_url", "docUrl", "url"):
+        doc_url = _normalize_doc_url(payload.get(key))
+        if doc_url:
+            return doc_url
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        for key in ("doc_url", "docUrl", "url"):
+            doc_url = _normalize_doc_url(data.get(key))
+            if doc_url:
+                return doc_url
+    return None
+
+
+def _extract_doc_url(tool_name: str, args_dict: dict[str, Any], result_text: str) -> str | None:
+    for key in ("docurl", "doc_url", "docUrl", "url"):
+        doc_url = _normalize_doc_url(args_dict.get(key))
+        if doc_url:
+            return doc_url
+
+    doc_url = _extract_doc_url_from_payload(_parse_json_payload(result_text))
+    if doc_url:
+        return doc_url
+
+    if str(tool_name or "").strip().endswith("create_doc"):
+        return _normalize_doc_url(_extract_with_pattern(DOC_URL_PATTERN, result_text))
+    return None
 
 
 def init_db() -> None:
@@ -254,13 +320,11 @@ def save_flow_event(
 
 def extract_doc_binding(tool_name: str, args_dict: dict[str, Any], result_text: str) -> dict[str, str | None] | None:
     doc_id = _find_first_value(args_dict, ("docid", "doc_id", "docId"))
-    doc_url = _find_first_value(args_dict, ("docurl", "doc_url", "docUrl"))
+    doc_url = _extract_doc_url(tool_name, args_dict, result_text)
     doc_name = _find_first_value(args_dict, ("doc_name", "docName", "docname", "doc_name_or_title"))
 
     if not doc_id:
         doc_id = _extract_with_pattern(DOC_ID_PATTERN, result_text)
-    if not doc_url:
-        doc_url = _extract_with_pattern(DOC_URL_PATTERN, result_text)
     if not doc_name:
         doc_name = _extract_with_pattern(DOC_NAME_PATTERN, result_text)
 
@@ -683,6 +747,19 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
             (session_id,),
         ).fetchall()
 
+        assistant_turns = conn.execute(
+            """
+            SELECT content
+            FROM conversation_turns
+            WHERE session_id = ?
+              AND role = 'assistant'
+              AND created_at >= datetime('now', '-7 day')
+            ORDER BY created_at DESC
+            LIMIT 3
+            """,
+            (session_id,),
+        ).fetchall()
+
         uploaded_files = conn.execute(
             """
             SELECT file_name, stored_path, upload_action, created_at,
@@ -723,6 +800,12 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
         for row in reversed(user_turns):
             turn_lines.append(f"- user: {_short_text(row['content'], limit=300)}")
         sections.append("\n".join(turn_lines))
+
+    if assistant_turns:
+        assistant_lines = ["Recent assistant replies:"]
+        for row in reversed(assistant_turns):
+            assistant_lines.append(f"- assistant: {_short_text(row['content'], limit=300)}")
+        sections.append("\n".join(assistant_lines))
 
     if uploaded_files:
         upload_lines = ["Recent uploaded files:"]
