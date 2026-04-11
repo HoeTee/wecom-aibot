@@ -50,7 +50,7 @@ def build_upload_route_payload(file_name: str, action: str) -> dict[str, Any]:
         route_code="upload_ingest",
         route_detail="pdf_upload_to_knowledge_base",
         reasons=["pdf_file_message"],
-        selected_target=build_selected_target("uploaded_file", file_name, file_name),
+        selected_target=build_selected_target("knowledge_base_file", file_name, file_name),
         guard_hits=build_upload_guard_hits(action),
         clarify_needed=False,
     )

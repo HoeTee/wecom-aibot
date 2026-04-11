@@ -48,6 +48,10 @@ def normalize_pdf_filename(filename: str) -> str:
 
 
 def upload_storage_name(filename: str) -> str:
+    return normalize_pdf_filename(filename)
+
+
+def legacy_upload_storage_name(filename: str) -> str:
     return f"upload__{normalize_pdf_filename(filename)}"
 
 
@@ -78,7 +82,8 @@ def _display_name(path: Path) -> str:
 
 
 def _source_type(path: Path) -> str:
-    return "upload" if path.name.startswith("upload__") else "base"
+    _ = path
+    return "knowledge_base"
 
 
 def _tokenize(value: str) -> set[str]:
@@ -136,11 +141,9 @@ def _score_record(record: dict[str, Any], query: str) -> tuple[int, str]:
 
 
 def _list_records(source_type: str | None = None) -> list[dict[str, Any]]:
+    _ = source_type
     records: list[dict[str, Any]] = []
     for path in knowledge_base_pdf_paths():
-        current_source_type = _source_type(path)
-        if source_type and current_source_type != source_type:
-            continue
         records.append(_record_from_path(path))
     return records
 
@@ -151,7 +154,7 @@ def _recent_uploads(limit: int = 5) -> list[dict[str, Any]]:
     paths = sorted(
         (
             path
-            for path in KNOWLEDGE_BASE_DIR.glob("upload__*.pdf")
+            for path in KNOWLEDGE_BASE_DIR.glob("*.pdf")
             if path.is_file()
         ),
         key=lambda item: item.stat().st_mtime,
@@ -216,7 +219,8 @@ def _resolve_record(
 
 
 def _can_rename(record: dict[str, Any]) -> bool:
-    return str(record.get("source_type") or "") == "upload"
+    _ = record
+    return True
 
 
 def _export_path(record: dict[str, Any]) -> Path:
@@ -266,17 +270,27 @@ def _delete(record: dict[str, Any]) -> dict[str, Any]:
 def _store_upload(file_bytes: bytes, original_name: str) -> dict[str, str | None]:
     KNOWLEDGE_BASE_DIR.mkdir(parents=True, exist_ok=True)
     target_path = KNOWLEDGE_BASE_DIR / upload_storage_name(original_name)
+    legacy_target_path = KNOWLEDGE_BASE_DIR / legacy_upload_storage_name(original_name)
     incoming_sha = sha256_bytes(file_bytes)
 
+    existing_target_path: Path | None = None
     if target_path.exists():
-        existing_bytes = target_path.read_bytes()
+        existing_target_path = target_path
+    elif legacy_target_path.exists():
+        existing_target_path = legacy_target_path
+
+    if existing_target_path is not None:
+        existing_bytes = existing_target_path.read_bytes()
         if sha256_bytes(existing_bytes) == incoming_sha:
+            if existing_target_path != target_path:
+                existing_target_path.rename(target_path)
+                existing_target_path = target_path
             return {
-                "file_name": _display_name(target_path),
-                "stored_path": relative_project_path(target_path),
+                "file_name": _display_name(existing_target_path),
+                "stored_path": relative_project_path(existing_target_path),
                 "action": "unchanged",
-                "matched_file_name": _display_name(target_path),
-                "matched_stored_path": relative_project_path(target_path),
+                "matched_file_name": _display_name(existing_target_path),
+                "matched_stored_path": relative_project_path(existing_target_path),
             }
         action = "replaced"
     else:
@@ -295,6 +309,8 @@ def _store_upload(file_bytes: bytes, original_name: str) -> dict[str, str | None
             "matched_stored_path": relative_project_path(existing_path),
         }
 
+    if existing_target_path is not None and existing_target_path != target_path and existing_target_path.exists():
+        existing_target_path.unlink()
     target_path.write_bytes(file_bytes)
     return {
         "file_name": _display_name(target_path),
@@ -308,21 +324,19 @@ def _store_upload(file_bytes: bytes, original_name: str) -> dict[str, str | None
 def execute_kb_action(action: str, **kwargs: Any) -> dict[str, Any]:
     if action == "kb.list":
         scope = str(kwargs.get("scope") or "all")
-        source_type = scope if scope in {"upload", "base"} else None
-        records = _list_records(source_type=source_type)
+        records = _list_records(source_type=None)
         return {"ok": True, "action": action, "scope": scope, "records": records, "total": len(records)}
 
     if action == "kb.list_uploads":
         limit = int(kwargs.get("limit") or 5)
         records = _recent_uploads(limit=limit)
-        return {"ok": True, "action": action, "scope": "upload", "records": records, "total": len(records)}
+        return {"ok": True, "action": action, "scope": "recent", "records": records, "total": len(records)}
 
     if action == "kb.match_related":
         query = str(kwargs.get("query") or "").strip()
         limit = int(kwargs.get("limit") or 10)
         scope = str(kwargs.get("scope") or "all")
-        source_type = scope if scope in {"upload", "base"} else None
-        records = _match_records(query, limit=limit, source_type=source_type)
+        records = _match_records(query, limit=limit, source_type=None)
         return {
             "ok": True,
             "action": action,

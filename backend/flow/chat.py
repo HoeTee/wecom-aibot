@@ -20,6 +20,7 @@ from backend.runtime import MCPHost, load_mcp_server_configs_from_env
 from backend.runtime.local_tools import get_local_agent_tools
 from backend.state.store import (
     build_session_id,
+    current_bound_doc,
     generate_request_id,
     latest_uploaded_file,
     load_memory_context,
@@ -31,6 +32,33 @@ from backend.state.store import (
 
 
 ChatResult = dict[str, Any]
+
+
+def _tool_modifies_wecom_target(tool_name: str) -> bool:
+    name = str(tool_name or "").strip()
+    if not name:
+        return False
+    if name == "wecom_docs__create_doc":
+        return True
+    if name in {"doc__append_section", "doc__replace_section", "doc__expand_section"}:
+        return True
+    if name.startswith("wecom_docs__smartsheet_"):
+        return any(token in name for token in ("add_", "update_", "delete_"))
+    if name.startswith("wecom_docs__") and any(token in name for token in ("edit_doc_content", "edit_doc", "update_doc")):
+        return True
+    return False
+
+
+def _reply_has_wecom_link(reply: str) -> bool:
+    return "https://doc.weixin.qq.com/" in str(reply or "")
+
+
+def _append_bound_doc_link(reply: str, doc_url: str | None) -> str:
+    text = str(reply or "").rstrip()
+    url = str(doc_url or "").strip()
+    if not url or _reply_has_wecom_link(text):
+        return text
+    return f"{text}\n\n链接：{url}"
 
 
 def _use_local_rag_runtime(server_name: str) -> bool:
@@ -101,22 +129,22 @@ def _maybe_short_circuit_upload_followup(session_id: str, content: str) -> tuple
     matched_file_name = str(latest_upload.get("matched_file_name") or "").strip() or None
 
     if action == "unchanged":
-        reply = f"刚上传的 PDF `{file_name}` 已经在知识库里了，不需要重复添加。"
+        reply = f"刚加入知识库处理流程的 PDF `{file_name}` 已经在知识库里了，不需要重复添加。"
     elif action == "duplicate_content":
         if matched_file_name:
-            reply = f"刚上传的 PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，未重复加入。"
+            reply = f"刚加入知识库处理流程的 PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，未重复加入。"
         else:
-            reply = f"刚上传的 PDF `{file_name}` 与知识库中的已有文件内容完全一致，未重复加入。"
+            reply = f"刚加入知识库处理流程的 PDF `{file_name}` 与知识库中的已有文件内容完全一致，未重复加入。"
     elif action == "replaced":
-        reply = f"刚上传的 PDF `{file_name}` 已经更新到知识库了。"
+        reply = f"刚处理的 PDF `{file_name}` 已经更新到知识库了。"
     else:
-        reply = f"刚上传的 PDF `{file_name}` 已经加入知识库了。"
+        reply = f"刚处理的 PDF `{file_name}` 已经加入知识库了。"
 
     payload = build_route_payload(
         route_code="short_circuit",
         route_detail="upload_followup_confirmation",
         reasons=["knowledge_base_followup_detected", "recent_uploaded_file_found"],
-        selected_target=build_selected_target("uploaded_file", file_name, file_name),
+        selected_target=build_selected_target("knowledge_base_file", file_name, file_name),
         guard_hits=[{"code": "upload_followup_guard", "detail": "ack_existing_upload"}],
         clarify_needed=False,
     )
@@ -191,8 +219,11 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
         memory_context = load_memory_context(session_id, include_bound_doc=include_bound_doc)
         emit_flow("flow", "route_selected", route_payload)
         emit_flow("state", "memory_loaded", build_memory_loaded_payload(include_bound_doc, bool(memory_context)))
+        modified_bound_doc_url: str | None = None
+        modified_wecom_target = False
 
         def on_tool_result(tool_name: str, args_dict: dict[str, Any], result_text: str) -> None:
+            nonlocal modified_bound_doc_url, modified_wecom_target
             save_tool_call(session_id, tool_name, args_dict, result_text, request_id=request_id)
             binding = persist_doc_binding_from_tool_result(
                 session_id=session_id,
@@ -205,6 +236,9 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
             if not binding:
                 return
             emit_flow("state", "doc_binding_updated", build_doc_binding_updated_payload(binding))
+            if _tool_modifies_wecom_target(tool_name):
+                modified_wecom_target = True
+                modified_bound_doc_url = str(binding.get("doc_url") or "").strip() or modified_bound_doc_url
 
         save_user_turn_once(content)
         agent = Agent(
@@ -236,6 +270,10 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
             emit_flow("flow", "stop_reason", build_stop_reason_payload("agent_timeout", "safe_reply_after_timeout"))
             return {"reply": reply, "requestId": request_id}
         reply = reply or "No response generated."
+        if modified_wecom_target:
+            bound_doc = current_bound_doc(session_id)
+            bound_doc_url = str((bound_doc or {}).get("doc_url") or "").strip() or None
+            reply = _append_bound_doc_link(reply, modified_bound_doc_url or bound_doc_url)
         save_turn(session_id, "assistant", reply, request_id=request_id)
         emit_flow("entry", "reply_generated", build_reply_generated_payload("assistant_final", reply))
         response: ChatResult = {"reply": reply, "requestId": request_id}

@@ -808,7 +808,7 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
         sections.append("\n".join(assistant_lines))
 
     if uploaded_files:
-        upload_lines = ["Recent uploaded files:"]
+        upload_lines = ["Recent files added to the knowledge base (not the full knowledge-base file list):"]
         for row in reversed(uploaded_files):
             upload_lines.append(
                 f"- file_name={row['file_name']}; "

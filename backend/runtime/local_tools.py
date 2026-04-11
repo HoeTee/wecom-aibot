@@ -55,7 +55,7 @@ KB_LIST_FILES_TOOL = {
         "name": KB_LIST_FILES_TOOL_NAME,
         "description": (
             "List PDF files from the local knowledge base. "
-            "Use this for requests like listing files, counting files, listing uploads, or understanding what PDFs exist "
+            "Use this for requests like listing files, counting files, or understanding what PDFs exist "
             "before export, rename, delete, or related-file lookup."
         ),
         "parameters": {
@@ -63,8 +63,7 @@ KB_LIST_FILES_TOOL = {
             "properties": {
                 "scope": {
                     "type": "string",
-                    "enum": ["all", "upload", "base"],
-                    "description": "Which files to list: all PDFs, only uploaded PDFs, or only fixed base materials.",
+                    "description": "Optional compatibility field. Ignored; all PDFs in the knowledge base are listed.",
                 }
             },
             "additionalProperties": False,
@@ -76,7 +75,7 @@ KB_LIST_UPLOADS_TOOL = {
     "type": "function",
     "function": {
         "name": KB_LIST_UPLOADS_TOOL_NAME,
-        "description": "List the most recent uploaded PDF files in the local knowledge base.",
+        "description": "Compatibility tool for listing recently added PDF files from the local knowledge base.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -111,8 +110,7 @@ KB_MATCH_RELATED_TOOL = {
                 },
                 "scope": {
                     "type": "string",
-                    "enum": ["all", "upload", "base"],
-                    "description": "Optional source scope restriction.",
+                    "description": "Optional compatibility field. Ignored; matching searches the whole knowledge base.",
                 },
             },
             "required": ["query"],
@@ -140,11 +138,6 @@ KB_EXPORT_FILE_TOOL = {
                     "type": "string",
                     "description": "Stored project-relative path when available from a previous listing result.",
                 },
-                "source_type": {
-                    "type": "string",
-                    "enum": ["upload", "base"],
-                    "description": "Optional source type restriction.",
-                },
             },
             "additionalProperties": False,
         },
@@ -156,7 +149,7 @@ KB_RENAME_FILE_TOOL = {
     "function": {
         "name": KB_RENAME_FILE_TOOL_NAME,
         "description": (
-            "Rename an uploaded PDF file in the local knowledge base. "
+            "Rename a PDF file in the local knowledge base. "
             "Ask for explicit user confirmation first, then call this tool with confirmed=true."
         ),
         "parameters": {
@@ -174,11 +167,6 @@ KB_RENAME_FILE_TOOL = {
                     "type": "string",
                     "description": "The new PDF file name to apply.",
                 },
-                "source_type": {
-                    "type": "string",
-                    "enum": ["upload", "base"],
-                    "description": "Optional source type restriction.",
-                },
                 "confirmed": {
                     "type": "boolean",
                     "description": "Must be true only after the user has explicitly confirmed the rename.",
@@ -195,7 +183,7 @@ KB_DELETE_FILE_TOOL = {
     "function": {
         "name": KB_DELETE_FILE_TOOL_NAME,
         "description": (
-            "Delete an uploaded PDF file from the local knowledge base. "
+            "Delete a PDF file from the local knowledge base. "
             "Ask for explicit user confirmation first, then call this tool with confirmed=true."
         ),
         "parameters": {
@@ -208,11 +196,6 @@ KB_DELETE_FILE_TOOL = {
                 "stored_path": {
                     "type": "string",
                     "description": "Stored project-relative path when available from a previous listing result.",
-                },
-                "source_type": {
-                    "type": "string",
-                    "enum": ["upload", "base"],
-                    "description": "Optional source type restriction.",
                 },
                 "confirmed": {
                     "type": "boolean",
@@ -340,7 +323,6 @@ DOC_EXPAND_SECTION_TOOL = {
 _LOCAL_TOOL_NAMES = {
     AGENT_NO_TOOL_NEEDED_TOOL_NAME,
     KB_LIST_FILES_TOOL_NAME,
-    KB_LIST_UPLOADS_TOOL_NAME,
     KB_MATCH_RELATED_TOOL_NAME,
     KB_EXPORT_FILE_TOOL_NAME,
     KB_RENAME_FILE_TOOL_NAME,
@@ -358,7 +340,6 @@ def get_local_agent_tools() -> list[dict[str, object]]:
     return [
         copy.deepcopy(AGENT_NO_TOOL_NEEDED_TOOL),
         copy.deepcopy(KB_LIST_FILES_TOOL),
-        copy.deepcopy(KB_LIST_UPLOADS_TOOL),
         copy.deepcopy(KB_MATCH_RELATED_TOOL),
         copy.deepcopy(KB_EXPORT_FILE_TOOL),
         copy.deepcopy(KB_RENAME_FILE_TOOL),
@@ -417,7 +398,7 @@ async def execute_local_agent_tool(
         return {"content": f"No tool needed: {reason}", "attachment": None}
 
     if name == KB_LIST_FILES_TOOL_NAME:
-        payload = await async_dispatch_cli_action("kb.list", scope=args_dict.get("scope") or "all")
+        payload = await async_dispatch_cli_action("kb.list", scope="all")
         return {"content": json.dumps(payload, ensure_ascii=False), "attachment": None}
 
     if name == KB_LIST_UPLOADS_TOOL_NAME:
@@ -432,7 +413,7 @@ async def execute_local_agent_tool(
             "kb.match_related",
             query=query,
             limit=int(args_dict.get("limit") or 10),
-            scope=args_dict.get("scope") or "all",
+            scope="all",
         )
         return {"content": json.dumps(payload, ensure_ascii=False), "attachment": None}
 
@@ -442,7 +423,6 @@ async def execute_local_agent_tool(
             "kb.export",
             file_name=args_dict.get("file_name"),
             stored_path=args_dict.get("stored_path"),
-            source_type=args_dict.get("source_type"),
         )
         return {
             "content": json.dumps(payload, ensure_ascii=False),
@@ -461,7 +441,6 @@ async def execute_local_agent_tool(
             "kb.rename",
             file_name=args_dict.get("file_name"),
             stored_path=args_dict.get("stored_path"),
-            source_type=args_dict.get("source_type"),
             new_file_name=str(args_dict.get("new_file_name") or "").strip(),
         )
         return {"content": json.dumps(payload, ensure_ascii=False), "attachment": None}
@@ -474,7 +453,6 @@ async def execute_local_agent_tool(
             "kb.delete",
             file_name=args_dict.get("file_name"),
             stored_path=args_dict.get("stored_path"),
-            source_type=args_dict.get("source_type"),
         )
         return {"content": json.dumps(payload, ensure_ascii=False), "attachment": None}
 

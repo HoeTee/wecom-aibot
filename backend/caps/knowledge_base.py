@@ -12,7 +12,8 @@ def sha256_bytes(content: bytes) -> str:
 
 
 def _scope_from_source_type(source_type: str | None) -> str:
-    return source_type if source_type in {"upload", "base"} else "all"
+    _ = source_type
+    return "all"
 
 
 def list_kb_files(*, source_type: str | None = None) -> dict[str, Any]:
@@ -82,7 +83,8 @@ def find_record_by_file_name(file_name: str, *, source_type: str | None = None) 
 
 
 def can_rename_record(record: dict[str, Any]) -> bool:
-    return str(record.get("source_type") or "") == "upload"
+    _ = record
+    return True
 
 
 def build_recent_upload_fallback_candidates(limit: int = 3) -> list[dict[str, Any]]:
