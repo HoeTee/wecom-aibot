@@ -7,7 +7,6 @@ from typing import Any
 from .cli import async_dispatch_cli_action
 from backend.tools.llamaindex_rag.runtime import (
     LOCAL_RAG_SEARCH_TOOL,
-    LOCAL_RAG_SUMMARIZE_TOOL,
     is_rag_tool_name,
     rag_action_for_tool_name,
 )
@@ -352,7 +351,6 @@ _LOCAL_TOOL_NAMES = {
     DOC_REPLACE_SECTION_TOOL_NAME,
     DOC_EXPAND_SECTION_TOOL_NAME,
     LOCAL_RAG_SEARCH_TOOL["function"]["name"],
-    LOCAL_RAG_SUMMARIZE_TOOL["function"]["name"],
 }
 
 
@@ -371,7 +369,6 @@ def get_local_agent_tools() -> list[dict[str, object]]:
         copy.deepcopy(DOC_REPLACE_SECTION_TOOL),
         copy.deepcopy(DOC_EXPAND_SECTION_TOOL),
         copy.deepcopy(LOCAL_RAG_SEARCH_TOOL),
-        copy.deepcopy(LOCAL_RAG_SUMMARIZE_TOOL),
     ]
 
 

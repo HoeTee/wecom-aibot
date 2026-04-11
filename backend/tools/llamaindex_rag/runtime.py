@@ -84,7 +84,7 @@ def is_rag_tool_name(function_name: str) -> bool:
 
 
 def get_local_rag_tools() -> list[dict[str, object]]:
-    return [copy.deepcopy(LOCAL_RAG_SEARCH_TOOL), copy.deepcopy(LOCAL_RAG_SUMMARIZE_TOOL)]
+    return [copy.deepcopy(LOCAL_RAG_SEARCH_TOOL)]
 
 
 def rag_action_for_tool_name(function_name: str) -> str | None:
