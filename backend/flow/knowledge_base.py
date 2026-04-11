@@ -45,7 +45,7 @@ from backend.policy.knowledge_base import (
     wants_summary,
     wants_summary_and_doc,
 )
-from backend.policy.routing import build_route_payload, build_selected_target
+from backend.policy.payloads import build_route_payload, build_selected_target
 from backend.state.store import (
     latest_route_selection,
     latest_recent_candidate_list,

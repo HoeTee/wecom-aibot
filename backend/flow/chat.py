@@ -5,21 +5,23 @@ from typing import Any
 
 from backend.agent import Agent, Settings
 from backend.caps.documents import load_system_prompt
-from backend.policy.chat import (
+from backend.policy.payloads import (
     build_doc_binding_updated_payload,
     build_memory_loaded_payload,
     build_reply_generated_payload,
     build_request_received_payload,
+    build_route_payload,
     build_runtime_ready_payload,
+    build_selected_target,
     build_stop_reason_payload,
-    select_chat_route,
 )
-from backend.policy.routing import maybe_short_circuit_upload_followup
+from backend.policy.document import is_fresh_document_request
 from backend.runtime import MCPHost, load_mcp_server_configs_from_env
 from backend.runtime.local_tools import get_local_agent_tools
 from backend.state.store import (
     build_session_id,
     generate_request_id,
+    latest_uploaded_file,
     load_memory_context,
     persist_doc_binding_from_tool_result,
     save_flow_event,
@@ -33,6 +35,92 @@ ChatResult = dict[str, Any]
 
 def _use_local_rag_runtime(server_name: str) -> bool:
     return str(server_name or "").strip().lower() == "llamaindex_rag"
+
+
+def _is_add_to_knowledge_base_request(content: str) -> bool:
+    text = str(content or "").strip()
+    if not text:
+        return False
+
+    if not any(token in text for token in ("知识库", "知识源", "知识库里")):
+        return False
+    if not any(token in text for token in ("加入", "添加", "放到", "纳入", "导入")):
+        return False
+    if not any(
+        token in text
+        for token in (
+            "这份文档",
+            "这个文件",
+            "刚上传的文件",
+            "刚才上传的文件",
+            "刚上传的 PDF",
+            "刚上传的pdf",
+            "这个 PDF",
+            "这个pdf",
+            "文档",
+            "文件",
+            "PDF",
+            "pdf",
+        )
+    ):
+        return False
+    if any(token in text for token in ("总结", "摘要", "生成", "分析", "文档必须包含")):
+        return False
+    return True
+
+
+def _build_agent_route_payload(content: str) -> tuple[bool, dict[str, Any]]:
+    include_bound_doc = not is_fresh_document_request(content)
+    route_detail = "fresh_document_request" if not include_bound_doc else "default_agent_flow"
+    route_reason = ["fresh_document_request"] if not include_bound_doc else ["default_text_message"]
+    route_payload = build_route_payload(
+        route_code="agent_chat",
+        route_detail=route_detail,
+        reasons=route_reason,
+        selected_target=build_selected_target(
+            "document" if include_bound_doc else "none",
+            None,
+            None,
+            clear_reason="fresh_document_request" if not include_bound_doc else "no_target_selected_at_route_time",
+        ),
+        clarify_needed=False,
+    )
+    return include_bound_doc, route_payload
+
+
+def _maybe_short_circuit_upload_followup(session_id: str, content: str) -> tuple[str, dict[str, Any]] | None:
+    if not _is_add_to_knowledge_base_request(content):
+        return None
+
+    latest_upload = latest_uploaded_file(session_id)
+    if not latest_upload:
+        return None
+
+    file_name = str(latest_upload["file_name"])
+    action = str(latest_upload["upload_action"])
+    matched_file_name = str(latest_upload.get("matched_file_name") or "").strip() or None
+
+    if action == "unchanged":
+        reply = f"刚上传的 PDF `{file_name}` 已经在知识库里了，不需要重复添加。"
+    elif action == "duplicate_content":
+        if matched_file_name:
+            reply = f"刚上传的 PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，未重复加入。"
+        else:
+            reply = f"刚上传的 PDF `{file_name}` 与知识库中的已有文件内容完全一致，未重复加入。"
+    elif action == "replaced":
+        reply = f"刚上传的 PDF `{file_name}` 已经更新到知识库了。"
+    else:
+        reply = f"刚上传的 PDF `{file_name}` 已经加入知识库了。"
+
+    payload = build_route_payload(
+        route_code="short_circuit",
+        route_detail="upload_followup_confirmation",
+        reasons=["knowledge_base_followup_detected", "recent_uploaded_file_found"],
+        selected_target=build_selected_target("uploaded_file", file_name, file_name),
+        guard_hits=[{"code": "upload_followup_guard", "detail": "ack_existing_upload"}],
+        clarify_needed=False,
+    )
+    return reply, payload
 
 
 def _summarize_args(args_dict: dict[str, Any]) -> dict[str, Any]:
@@ -167,7 +255,7 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
     try:
         emit_flow("entry", "request_received", build_request_received_payload("text", content_preview=content[:200]))
 
-        short_circuit = maybe_short_circuit_upload_followup(session_id, content)
+        short_circuit = _maybe_short_circuit_upload_followup(session_id, content)
         if short_circuit:
             reply, route_payload = short_circuit
             save_user_turn_once(content)
@@ -177,7 +265,7 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
             emit_flow("flow", "stop_reason", build_stop_reason_payload("short_circuit", "upload_followup_confirmation"))
             return {"reply": reply, "requestId": request_id}
 
-        include_bound_doc, route_payload = select_chat_route(content)
+        include_bound_doc, route_payload = _build_agent_route_payload(content)
         return await run_agent_flow(
             content,
             include_bound_doc=include_bound_doc,

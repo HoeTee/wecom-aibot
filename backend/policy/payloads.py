@@ -2,8 +2,40 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.policy.document import is_fresh_document_request
-from backend.policy.routing import build_route_payload, build_selected_target
+
+def build_selected_target(
+    target_type: str,
+    primary_id: str | None,
+    display_name: str | None,
+    clear_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "target_type": target_type,
+        "primary_id": primary_id,
+        "display_name": display_name,
+        "clear_reason": clear_reason,
+    }
+
+
+def build_route_payload(
+    route_code: str,
+    route_detail: str,
+    reasons: list[str],
+    selected_target: dict[str, Any],
+    guard_hits: list[dict[str, str]] | None = None,
+    clarify_needed: bool = False,
+    clarify_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "route_selected": {"code": route_code, "detail": route_detail},
+        "route_reason": reasons,
+        "selected_target": selected_target,
+        "guard_hit": guard_hits or [],
+        "clarify_needed": {
+            "needed": clarify_needed,
+            "clarify_reason": clarify_reason,
+        },
+    }
 
 
 def build_request_received_payload(message_type: str, *, content_preview: str | None = None) -> dict[str, Any]:
@@ -11,25 +43,6 @@ def build_request_received_payload(message_type: str, *, content_preview: str | 
     if content_preview is not None:
         payload["content_preview"] = content_preview
     return payload
-
-
-def select_chat_route(content: str) -> tuple[bool, dict[str, Any]]:
-    include_bound_doc = not is_fresh_document_request(content)
-    route_detail = "fresh_document_request" if not include_bound_doc else "default_agent_flow"
-    route_reason = ["fresh_document_request"] if not include_bound_doc else ["default_text_message"]
-    route_payload = build_route_payload(
-        route_code="agent_chat",
-        route_detail=route_detail,
-        reasons=route_reason,
-        selected_target=build_selected_target(
-            "document" if include_bound_doc else "none",
-            None,
-            None,
-            clear_reason="fresh_document_request" if not include_bound_doc else "no_target_selected_at_route_time",
-        ),
-        clarify_needed=False,
-    )
-    return include_bound_doc, route_payload
 
 
 def build_memory_loaded_payload(include_bound_doc: bool, has_memory_context: bool) -> dict[str, Any]:

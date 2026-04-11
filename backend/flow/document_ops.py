@@ -20,7 +20,7 @@ from backend.caps.documents import (
     section_preview,
 )
 from backend.caps.knowledge_base import match_pdf_records, resolve_record_by_index
-from backend.caps.rag import query_rag
+from backend.caps.rag import summarize_rag
 from backend.policy.editing import (
     build_action_clarify_reply,
     build_location_clarify_reply,
@@ -39,7 +39,7 @@ from backend.policy.editing import (
     wants_system_generated_title,
 )
 from backend.policy.knowledge_base import parse_candidate_selection
-from backend.policy.routing import build_route_payload, build_selected_target
+from backend.policy.payloads import build_route_payload, build_selected_target
 from backend.runtime import MCPHost
 from backend.state.store import (
     current_bound_doc,
@@ -133,7 +133,7 @@ async def _build_source_summary(host: MCPHost, source_record: dict[str, Any], us
         f"请只基于知识库中的文件 `{file_name}`，围绕这个请求生成一段可直接写入企业微信文档的 Markdown 内容：{user_request}。"
         "不要引用其他文件。输出用中文。"
     )
-    return (await query_rag(host, query)).strip()
+    return (await summarize_rag(host, query)).strip()
 
 
 async def _execute_merge(
