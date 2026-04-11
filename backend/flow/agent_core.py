@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     max_result_tokens: int = Field(5000, alias="MAX_RESULT_TOKENS")
     routing_timeout_seconds: float = Field(15.0, alias="ROUTING_TIMEOUT_SECONDS")
     agent_timeout_seconds: float = Field(180.0, alias="AGENT_TIMEOUT_SECONDS")
+    max_invalid_tool_argument_rounds: int = Field(2, alias="MAX_INVALID_TOOL_ARGUMENT_ROUNDS")
 
 
 INTENT_PACKET_SYSTEM_PROMPT = """
@@ -232,6 +233,7 @@ class Agent:
         self.max_tool_calls = self.settings.max_tool_calls
         self.max_context_tokens = self.settings.max_context_tokens
         self.max_result_tokens = self.settings.max_result_tokens
+        self.max_invalid_tool_argument_rounds = self.settings.max_invalid_tool_argument_rounds
         self.intent_packet = dict(intent_packet or {})
         self.on_tool_result = on_tool_result
         self.on_flow_event = on_flow_event
@@ -239,6 +241,8 @@ class Agent:
 
         self.token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self.tool_call_count = 0
+        self.invalid_tool_argument_rounds = 0
+        self.force_tool_choice = False
 
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
@@ -298,6 +302,31 @@ class Agent:
                     pass
             print(f"[{self.name}] Failed to parse tool arguments for {function_name}")
             return None
+
+    def _collect_invalid_tool_calls(self, tool_calls: list[Any]) -> list[dict[str, str]]:
+        invalid_calls: list[dict[str, str]] = []
+        for tool_call in tool_calls:
+            function_name = str(tool_call.function.name or "").strip()
+            raw_arguments = str(tool_call.function.arguments or "")
+            if self._parse_tool_arguments(raw_arguments, function_name) is not None:
+                continue
+            invalid_calls.append(
+                {
+                    "tool_name": function_name,
+                    "arguments_preview": raw_arguments[:200],
+                }
+            )
+        return invalid_calls
+
+    def _invalid_tool_arguments_retry_message(self, invalid_calls: list[dict[str, str]]) -> str:
+        tool_names = ", ".join(call["tool_name"] for call in invalid_calls if call["tool_name"])
+        if not tool_names:
+            tool_names = "the requested tools"
+        return (
+            "你刚才生成的工具调用参数不是合法 JSON。"
+            f"请重新生成 {tool_names} 的工具调用，且 function.arguments 必须是严格 JSON："
+            "使用双引号、完整对象、不要注释、不要额外说明文字。"
+        )
 
     def _latest_user_message(self) -> str:
         for message in reversed(self.messages):
@@ -560,13 +589,54 @@ class Agent:
                 seed=self.settings.seed,
                 messages=self.messages,
                 tools=self.tools if self.tools else None,
-                tool_choice="required" if self.tools and self.tool_call_count == 0 else ("auto" if self.tools else None),
+                tool_choice=(
+                    "required"
+                    if self.tools and (self.tool_call_count == 0 or self.force_tool_choice)
+                    else ("auto" if self.tools else None)
+                ),
             )
 
             response_message = completion.choices[0].message
             self._update_token_usage(completion.usage)
 
             if response_message.tool_calls:
+                invalid_tool_calls = self._collect_invalid_tool_calls(response_message.tool_calls)
+                if invalid_tool_calls:
+                    self.invalid_tool_argument_rounds += 1
+                    self.force_tool_choice = True
+                    self._emit_flow(
+                        "guard_hit",
+                        {
+                            "guard_hit": [
+                                {
+                                    "code": "invalid_tool_arguments",
+                                    "detail": "model_generated_non_json_arguments",
+                                }
+                            ],
+                            "tool_names": [call["tool_name"] for call in invalid_tool_calls],
+                            "invalid_rounds": self.invalid_tool_argument_rounds,
+                        },
+                    )
+                    if self.invalid_tool_argument_rounds >= self.max_invalid_tool_argument_rounds:
+                        self._emit_flow(
+                            "stop_reason",
+                            {
+                                "code": "guard_stop",
+                                "detail": "repeated_invalid_tool_arguments",
+                                "layer": "flow",
+                            },
+                        )
+                        return "这次工具调用参数连续生成失败。请重试，或把你的要求说得更具体一些。"
+                    self.messages.append(
+                        {
+                            "role": "user",
+                            "content": self._invalid_tool_arguments_retry_message(invalid_tool_calls),
+                        }
+                    )
+                    continue
+
+                self.invalid_tool_argument_rounds = 0
+                self.force_tool_choice = False
                 self.messages.append(response_message.model_dump(exclude_unset=True))
                 self._emit_flow(
                     "agent_plan_created",
@@ -598,6 +668,8 @@ class Agent:
                     )
                     continue
             else:
+                self.invalid_tool_argument_rounds = 0
+                self.force_tool_choice = False
                 self._emit_flow(
                     "stop_reason",
                     {
