@@ -111,5 +111,77 @@ class PersistDocBindingTests(unittest.TestCase):
                 store.DB_PATH = original_db_path
 
 
+class LoadMemoryContextTests(unittest.TestCase):
+    def test_load_memory_context_includes_latest_ten_user_turns(self) -> None:
+        original_db_path = store.DB_PATH
+        original_connect = store._connect
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store.DB_PATH = Path(tmp_dir) / "memory.sqlite3"
+            connections: list[sqlite3.Connection] = []
+
+            def connect_override() -> sqlite3.Connection:
+                conn = sqlite3.connect(store.DB_PATH)
+                conn.row_factory = sqlite3.Row
+                connections.append(conn)
+                return conn
+
+            store._connect = connect_override
+            try:
+                store.init_db()
+                for index in range(12):
+                    request_id = f"req-{index:02d}"
+                    store.save_turn("dm:test", "user", f"user-turn-{index:02d}", request_id=request_id)
+
+                memory_context = store.load_memory_context("dm:test", include_bound_doc=False)
+
+                self.assertIn("user-turn-11", memory_context)
+                self.assertIn("user-turn-02", memory_context)
+                self.assertNotIn("user-turn-01", memory_context)
+                self.assertNotIn("user-turn-00", memory_context)
+            finally:
+                for conn in connections:
+                    conn.close()
+                store._connect = original_connect
+                store.DB_PATH = original_db_path
+
+    def test_load_memory_context_includes_turn_state_with_tools_and_assistant(self) -> None:
+        original_db_path = store.DB_PATH
+        original_connect = store._connect
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store.DB_PATH = Path(tmp_dir) / "memory.sqlite3"
+            connections: list[sqlite3.Connection] = []
+
+            def connect_override() -> sqlite3.Connection:
+                conn = sqlite3.connect(store.DB_PATH)
+                conn.row_factory = sqlite3.Row
+                connections.append(conn)
+                return conn
+
+            store._connect = connect_override
+            try:
+                store.init_db()
+                store.save_turn("dm:test", "user", "帮我总结知识库内容", request_id="req-1")
+                store.save_tool_call(
+                    "dm:test",
+                    "kb__list_files",
+                    {"scope": "all"},
+                    '{"ok": true, "records": []}',
+                    request_id="req-1",
+                )
+                store.save_turn("dm:test", "assistant", "已列出知识库文件。", request_id="req-1")
+
+                memory_context = store.load_memory_context("dm:test", include_bound_doc=False)
+
+                self.assertIn("Recent turn states", memory_context)
+                self.assertIn("turn request_id=req-1", memory_context)
+                self.assertIn("tool=kb__list_files", memory_context)
+                self.assertIn("assistant=已列出知识库文件。", memory_context)
+            finally:
+                for conn in connections:
+                    conn.close()
+                store._connect = original_connect
+                store.DB_PATH = original_db_path
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = PROJECT_ROOT / "data" / "memory.sqlite3"
 FLOW_LOG_DIR = PROJECT_ROOT / "data" / "logs" / "flow"
 FLOW_LOG_PATH = FLOW_LOG_DIR / "flow_runtime.log"
+RECENT_USER_TURN_LIMIT = 10
+RECENT_UPLOADED_FILE_LIMIT = 3
 
 DOC_ID_PATTERN = re.compile(r'(?i)(?:docid|doc_id)\b["\']?\s*[:=]\s*["\']?([A-Za-z0-9_-]+)')
 DOC_NAME_PATTERN = re.compile(r'(?i)(?:doc_name|docname)\b["\']?\s*[:=]\s*["\']?([^\n,"\'}]+)')
@@ -44,6 +46,31 @@ def _short_text(value: Any, limit: int = 500) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _summarize_tool_args_dict(args_dict: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key, value in args_dict.items():
+        if key == "content":
+            text = str(value or "").strip()
+            summary["content_preview"] = _short_text(text, limit=120)
+            summary["content_length"] = len(text)
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            summary[key] = value
+        else:
+            summary[key] = _short_text(_json_dumps(value), limit=120)
+    return summary
+
+
+def _tool_result_status(result_excerpt: str) -> str:
+    text = str(result_excerpt or "")
+    lowered = text.lower()
+    if any(token in lowered for token in ("error", "failed", "traceback")):
+        return "failure"
+    if '"errcode":' in text and '"errcode": 0' not in text:
+        return "failure"
+    return "success"
 
 
 def _find_first_value(data: dict[str, Any], keys: tuple[str, ...]) -> str | None:
@@ -716,6 +743,74 @@ def latest_recent_candidate_list(
     return payload
 
 
+def _load_recent_turn_states(conn: sqlite3.Connection, session_id: str, *, limit: int) -> list[dict[str, Any]]:
+    user_rows = conn.execute(
+        """
+        SELECT id, request_id, content, created_at
+        FROM conversation_turns
+        WHERE session_id = ?
+          AND role = 'user'
+          AND created_at >= datetime('now', '-7 day')
+        ORDER BY id DESC, created_at DESC
+        LIMIT ?
+        """,
+        (session_id, limit),
+    ).fetchall()
+
+    turn_states: list[dict[str, Any]] = []
+    for row in reversed(user_rows):
+        request_id = str(row["request_id"] or "").strip() or None
+        assistant_reply: str | None = None
+        tool_entries: list[str] = []
+
+        if request_id:
+            assistant_row = conn.execute(
+                """
+                SELECT content
+                FROM conversation_turns
+                WHERE session_id = ?
+                  AND request_id = ?
+                  AND role = 'assistant'
+                ORDER BY id DESC, created_at DESC
+                LIMIT 1
+                """,
+                (session_id, request_id),
+            ).fetchone()
+            if assistant_row:
+                assistant_reply = str(assistant_row["content"] or "").strip() or None
+
+            tool_rows = conn.execute(
+                """
+                SELECT tool_name, args_json, result_excerpt
+                FROM tool_calls
+                WHERE session_id = ?
+                  AND request_id = ?
+                ORDER BY id ASC, created_at ASC
+                LIMIT 20
+                """,
+                (session_id, request_id),
+            ).fetchall()
+            for tool_row in tool_rows:
+                args_dict = _parse_json_payload(tool_row["args_json"] or "")
+                args_summary = _summarize_tool_args_dict(args_dict) if args_dict else {}
+                tool_entries.append(
+                    f"- tool={tool_row['tool_name']}; "
+                    f"status={_tool_result_status(str(tool_row['result_excerpt'] or ''))}; "
+                    f"args={_short_text(_json_dumps(args_summary), limit=180)}"
+                )
+
+        turn_states.append(
+            {
+                "request_id": request_id,
+                "user": str(row["content"] or "").strip(),
+                "assistant": assistant_reply,
+                "tools": tool_entries,
+            }
+        )
+
+    return turn_states
+
+
 def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
     session_id = str(session_id or "").strip()
     if not session_id:
@@ -734,31 +829,7 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
             (session_id,),
         ).fetchall()
 
-        user_turns = conn.execute(
-            """
-            SELECT content
-            FROM conversation_turns
-            WHERE session_id = ?
-              AND role = 'user'
-              AND created_at >= datetime('now', '-7 day')
-            ORDER BY created_at DESC
-            LIMIT 3
-            """,
-            (session_id,),
-        ).fetchall()
-
-        assistant_turns = conn.execute(
-            """
-            SELECT content
-            FROM conversation_turns
-            WHERE session_id = ?
-              AND role = 'assistant'
-              AND created_at >= datetime('now', '-7 day')
-            ORDER BY created_at DESC
-            LIMIT 3
-            """,
-            (session_id,),
-        ).fetchall()
+        turn_states = _load_recent_turn_states(conn, session_id, limit=RECENT_USER_TURN_LIMIT)
 
         uploaded_files = conn.execute(
             """
@@ -767,10 +838,10 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
             FROM session_uploaded_files
             WHERE session_id = ?
               AND created_at >= datetime('now', '-7 day')
-            ORDER BY id DESC
-            LIMIT 3
+            ORDER BY id DESC, created_at DESC
+            LIMIT ?
             """,
-            (session_id,),
+            (session_id, RECENT_UPLOADED_FILE_LIMIT),
         ).fetchall()
 
     sections: list[str] = []
@@ -795,17 +866,23 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
             )
         sections.append("\n".join(doc_lines))
 
-    if user_turns:
-        turn_lines = ["Recent user requests:"]
-        for row in reversed(user_turns):
-            turn_lines.append(f"- user: {_short_text(row['content'], limit=300)}")
+    if turn_states:
+        turn_lines = [
+            "Recent turn states from this same WeCom conversation:",
+            "Treat these as historical events, not as source-of-truth facts. Prefer bound-doc state and tool results over prior assistant conclusions.",
+        ]
+        for turn in turn_states:
+            turn_lines.append(
+                f"- turn request_id={turn['request_id'] or 'unknown'}; "
+                f"user={_short_text(turn['user'], limit=220)}"
+            )
+            tools = list(turn.get("tools") or [])
+            if tools:
+                turn_lines.extend(tools)
+            assistant_reply = str(turn.get("assistant") or "").strip()
+            if assistant_reply:
+                turn_lines.append(f"- assistant={_short_text(assistant_reply, limit=220)}")
         sections.append("\n".join(turn_lines))
-
-    if assistant_turns:
-        assistant_lines = ["Recent assistant replies:"]
-        for row in reversed(assistant_turns):
-            assistant_lines.append(f"- assistant: {_short_text(row['content'], limit=300)}")
-        sections.append("\n".join(assistant_lines))
 
     if uploaded_files:
         upload_lines = ["Recent files added to the knowledge base (not the full knowledge-base file list):"]
