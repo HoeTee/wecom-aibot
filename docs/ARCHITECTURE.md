@@ -158,8 +158,10 @@
 - `backend/runtime/host.py`
 - `backend/runtime/connection.py`
 - `backend/runtime/cli.py`
-- `backend/runtime/local_tools.py`
-- `backend/runtime/mcp_logger.py`
+
+所有 MCP 连接逻辑已统一到此目录。
+
+### 7. `tools`
 
 职责：
 
@@ -180,7 +182,13 @@
 - `backend/tools/kb_cli.py`
 - `backend/tools/doc_cli.py`
 - `backend/tools/rag_cli.py`
-- `backend/tools/llamaindex_rag/*`
+
+`tools` 层里的 stdio wrapper 还必须满足一条额外约束：
+
+- 不能只做 import 转发
+- 必须在 `__main__` 中显式启动 `run(...)`
+
+### 8. `he`
 
 职责：
 

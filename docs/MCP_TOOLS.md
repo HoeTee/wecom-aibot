@@ -6,7 +6,15 @@
 
 ## 工具来源
 
-当前 agent 的工具分两类：
+- MCP 连接与调度统一在 `backend/runtime/*`
+- 本地 tool 实现统一在 `backend/tools/*`
+- 当前动作层开始收敛成 CLI 风格：
+  - `backend/runtime/cli.py`
+  - `backend/tools/kb_cli.py`
+  - `backend/tools/doc_cli.py`
+  - `backend/tools/rag_cli.py`
+- 本地 `stdio` MCP 服务如果启动即退出，应优先检查 `data/logs/mcp/<server_name>_stderr.log`
+- `runtime` 在 stdio 连接失败时，应同时记录 `command`、`args`、`cwd` 和对应 stderr 日志路径
 
 1. 外部 MCP server 暴露的工具
 2. 本地注册的 KB / doc / RAG 工具
