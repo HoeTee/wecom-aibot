@@ -219,6 +219,36 @@ wsClient.on("message.file", async (frame: WsFrame) => {
   });
 });
 
+wsClient.on("message.file", async (frame: WsFrame) => {
+  const fileUrl = frame.body?.file?.url;
+  const aesKey = frame.body?.file?.aeskey;
+  if (!fileUrl) {
+    return;
+  }
+
+  const payload = buildChatRequest(frame, `[上传文件] ${frame.body?.msgid ?? ""}`);
+  const streamId = generateReqId("stream");
+  void tryReplyStream(frame, streamId, "Receiving PDF...", false);
+
+  try {
+    const { buffer, filename } = await wsClient.downloadFile(fileUrl, aesKey);
+    const resolvedName = (filename ?? `${payload.msgId || "uploaded"}.pdf`).trim();
+    if (!resolvedName.toLowerCase().endsWith(".pdf")) {
+      throw new Error("Only PDF files can be added to the knowledge base");
+    }
+
+    const reply = await uploadKnowledgeBasePdf(payload, buffer, resolvedName);
+    const delivered = await tryReplyStream(frame, streamId, reply, true);
+    if (!delivered) {
+      console.error("Upload reply was not acknowledged by WeCom");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("Failed to process file message:", message);
+    await tryReplyStream(frame, streamId, `Request failed: ${message}`, true);
+  }
+});
+
 wsClient.on("event.enter_chat", async (frame: WsFrame) => {
   await wsClient.replyWelcome(frame, {
     msgtype: "text",
