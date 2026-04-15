@@ -1,4 +1,5 @@
-from .config import (
+from backend.runtime import (
+    MCPHost,
     MCPHostConfig,
     MCPServerConfig,
     build_legacy_single_server_config,

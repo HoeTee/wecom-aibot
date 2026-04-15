@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 from llama_index.core import Settings
-from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.schema import QueryBundle
 from llama_index.embeddings.openai_like import OpenAILikeEmbedding
 from llama_index.llms.openai_like import OpenAILike
 
 from .index import LlamaIndexBuilder
 from .qwen_reranker import QwenRerankPostprocessor
+
+
+MIN_RELEVANCE_SCORE = 0.10
 
 
 class LlamaIndexRAGEngine:
@@ -20,20 +25,24 @@ class LlamaIndexRAGEngine:
         rerank_base_url: str,
         rerank_model: str,
         builder: LlamaIndexBuilder | None = None,
-        similarity_top_k: int = 5,
+        similarity_top_k: int = 15,
         reranker: QwenRerankPostprocessor | None = None,
-        reranker_top_k: int = 3,
-    ):
+        reranker_top_k: int = 5,
+        min_relevance_score: float = MIN_RELEVANCE_SCORE,
+    ) -> None:
+        self.min_relevance_score = min_relevance_score
         self.builder = builder or LlamaIndexBuilder()
         self.similarity_top_k = similarity_top_k
 
-        self.reranker = reranker or QwenRerankPostprocessor(
-            api_key=rerank_api_key,
-            base_url=rerank_base_url,
-            model=rerank_model,
-            top_n=reranker_top_k,
-            instruct="Given a search query, retrieve relevant passages that answer the query.",
-        )
+        self.reranker = reranker
+        if self.reranker is None and rerank_api_key and rerank_model:
+            self.reranker = QwenRerankPostprocessor(
+                api_key=rerank_api_key,
+                base_url=rerank_base_url,
+                model=rerank_model,
+                top_n=reranker_top_k,
+                instruct="Given a search query, retrieve relevant passages that answer the query.",
+            )
 
         Settings.llm = OpenAILike(
             api_key=llm_api_key,
@@ -50,37 +59,33 @@ class LlamaIndexRAGEngine:
         )
 
     def _content_query(self, query: str) -> str:
-        content_query = query
+        content_query = str(query or "")
         replacements = {
-            "生成一份企业微信文档": "生成一份基于来源材料的文档内容",
+            "重新生成一份企业微信文档": "生成一份基于来源材料的文档内容",
             "给刚才那份文档": "",
+            "给刚才那个文档": "",
             "不要新建文档": "",
             "回复要简洁，并明确告诉我是否已经创建文档。": "",
-            "回复要简洁，并明确告诉我是否已经创建文档": "",
+            "回复要简洁。": "",
         }
 
         for old, new in replacements.items():
             content_query = content_query.replace(old, new)
 
         filtered_lines: list[str] = []
-        for line in content_query.splitlines():
-            stripped = line.strip()
-            if not stripped:
+        for raw_line in content_query.splitlines():
+            line = raw_line.strip()
+            if not line:
                 continue
-            if "明确告诉我是否已经创建文档" in stripped:
+            if "明确告诉我是否已经创建文档" in line:
                 continue
-            if stripped.startswith("回复要"):
+            if line.startswith("回复要"):
                 continue
-            filtered_lines.append(stripped)
+            filtered_lines.append(line)
 
-        return "\n".join(filtered_lines).strip() or query.strip()
+        return "\n".join(filtered_lines).strip() or str(query or "").strip()
 
-    def query(self, query: str) -> str:
-        bundle = self.builder.build()
-        if bundle is None:
-            return "No index available. Please check the data directory and try again."
-
-        content_query = self._content_query(query)
+    def _build_summary_prompt(self, bundle, content_query: str) -> str:
         source_files = bundle.source_files
         source_file_block = "\n".join(f"- {name}" for name in source_files)
         summary_brief_block = "\n\n".join(
@@ -88,21 +93,13 @@ class LlamaIndexRAGEngine:
             for document in bundle.summary_documents
         )
 
-        retriever = bundle.vector_index.as_retriever(similarity_top_k=self.similarity_top_k)
-        postprocessors = [self.reranker] if self.reranker else []
-
-        vector_query_engine = RetrieverQueryEngine.from_args(
-            retriever=retriever,
-            node_postprocessors=postprocessors,
-        )
-        summary_query = (
+        return (
             "Answer in Chinese and rely only on the provided paper briefs.\n"
             f"The knowledge base currently contains exactly {len(source_files)} PDF documents:\n{source_file_block}\n\n"
             "Treat each listed PDF as one paper and use all of them unless the user explicitly narrows scope.\n"
-            "Do not invent missing-domain constraints such as NLP/CV/multimodal.\n"
+            "Do not invent missing-domain constraints such as NLP, CV, or multimodal unless the source material says so.\n"
             "If the request also contains document-creation, document-editing, or reply-style instructions, ignore those operational instructions here and focus only on the source-grounded content that should go into the document body.\n"
             "Do not introduce a comparison table unless the request explicitly asks for a table.\n"
-            "Do not answer with '材料不足' just because the request mentions creating or editing a document.\n"
             "Only mark a field as unknown when the paper brief itself does not provide enough information.\n"
             "When the user requests a multi-paper summary, produce a structured synthesis with these sections when applicable:\n"
             "1. 背景\n"
@@ -113,16 +110,12 @@ class LlamaIndexRAGEngine:
             f"Content task:\n{content_query}"
         )
 
-        summary_response = Settings.llm.complete(summary_query)
-        vector_response = vector_query_engine.query(content_query)
+    def _format_retrieved_nodes(self, nodes) -> str:
+        if not nodes:
+            return "No relevant sections found."
 
         parts: list[str] = []
-        summary_text = str(summary_response).strip()
-        if summary_text:
-            parts.append(f"# 综合回答\n{summary_text}")
-
-        evidence_parts: list[str] = []
-        for i, source_node in enumerate(vector_response.source_nodes, 1):
+        for i, source_node in enumerate(nodes, 1):
             score = getattr(source_node, "score", None)
             text = source_node.get_content()
             metadata = getattr(source_node, "metadata", None) or {}
@@ -130,21 +123,50 @@ class LlamaIndexRAGEngine:
             filename = metadata.get("file_name") or metadata.get("filename") or metadata.get("source") or ""
             page_label = metadata.get("page_label") or metadata.get("page") or ""
 
-            location = []
+            location: list[str] = []
             if filename:
                 location.append(f"file={filename}")
             if page_label != "":
                 location.append(f"page={page_label}")
 
-            header = f"## 证据片段 {i}"
+            header = f"## Evidence {i}"
             if location:
                 header += f" [{', '.join(location)}]"
             if score is not None:
                 header += f" (score={score:.3f})"
 
-            evidence_parts.append(f"{header}\n{text}")
+            parts.append(f"{header}\n{text}")
 
-        if evidence_parts:
-            parts.append("# 证据片段\n" + "\n\n---\n\n".join(evidence_parts))
+        return "# Retrieved Passages\n" + "\n\n---\n\n".join(parts)
 
-        return "\n\n".join(parts) if parts else "No relevant sections found."
+    def summarize(self, query: str) -> str:
+        bundle = self.builder.build()
+        content_query = self._content_query(query)
+        summary_query = self._build_summary_prompt(bundle, content_query)
+        summary_response = Settings.llm.complete(summary_query)
+        summary_text = str(summary_response).strip()
+        return summary_text or "No summary generated."
+
+    def search(self, query: str) -> str:
+        bundle = self.builder.build()
+        content_query = self._content_query(query)
+
+        retriever = bundle.vector_index.as_retriever(similarity_top_k=self.similarity_top_k)
+        nodes = retriever.retrieve(content_query)
+
+        if self.reranker:
+            nodes = self.reranker.postprocess_nodes(
+                nodes,
+                query_bundle=QueryBundle(query_str=content_query),
+            )
+
+        if self.min_relevance_score > 0:
+            nodes = [
+                n for n in nodes
+                if getattr(n, "score", None) is None or n.score >= self.min_relevance_score
+            ]
+
+        return self._format_retrieved_nodes(nodes)
+
+    def query(self, query: str) -> str:
+        return self.summarize(query)

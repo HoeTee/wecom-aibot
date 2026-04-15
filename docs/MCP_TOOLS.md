@@ -6,9 +6,8 @@ agent 通过 MCP tools 调用外部能力，而不是直接自由执行本地命
 
 当前代码上：
 
-- 稳定 MCP 连接入口仍保留在 `backend/mcp_client/*`
-- 新的主编辑位置优先收敛到 `backend/runtime/*`
-- 真正的本地 tool 实现优先收敛到 `backend/tools/*`
+- MCP 连接与调度统一在 `backend/runtime/*`
+- 本地 tool 实现统一在 `backend/tools/*`
 - 当前动作层开始收敛成 CLI 风格：
   - `backend/runtime/cli.py`
   - `backend/tools/kb_cli.py`

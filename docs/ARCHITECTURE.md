@@ -175,11 +175,7 @@
 
 - `backend/runtime/cli.py`
 
-兼容包装仍保留在：
-
-- `backend/mcp_client/*`
-
-这些旧路径现在主要用于兼容历史 import，不是新的主编辑位置。
+所有 MCP 连接逻辑已统一到此目录。
 
 ### 7. `tools`
 
@@ -202,12 +198,6 @@
 - `backend/tools/kb_cli.py`
 - `backend/tools/doc_cli.py`
 - `backend/tools/rag_cli.py`
-
-兼容包装仍保留在：
-
-- `backend/mcp_server_local/*`
-
-这些旧路径现在主要用于兼容旧 MCP 启动路径。
 
 `tools` 层里的 stdio wrapper 还必须满足一条额外约束：
 

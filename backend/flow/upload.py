@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from backend.caps.knowledge_base import sha256_bytes, store_pdf_in_knowledge_base
-from backend.policy.chat import build_reply_generated_payload, build_request_received_payload, build_stop_reason_payload
+from backend.policy.payloads import build_reply_generated_payload, build_request_received_payload, build_stop_reason_payload
 from backend.policy.upload import (
     UploadValidationError,
     build_upload_reply,

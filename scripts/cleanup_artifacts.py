@@ -6,8 +6,6 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TARGET_DIRS = [
-    PROJECT_ROOT / "he" / "runs",
-    PROJECT_ROOT / "he" / "reports",
     PROJECT_ROOT / "data" / "logs",
 ]
 
@@ -24,7 +22,7 @@ def _clean_directory(path: Path) -> None:
 def main() -> None:
     for target in TARGET_DIRS:
         _clean_directory(target)
-    print("Cleaned HE runs/reports and runtime logs.")
+    print("Cleaned runtime logs.")
 
 
 if __name__ == "__main__":

@@ -5,25 +5,27 @@ from typing import Any
 
 from backend.agent import Agent, Settings, classify_intent_packet
 from backend.caps.documents import load_system_prompt
-from backend.flow.document_ops import handle_document_operation_request
-from backend.flow.knowledge_base import handle_knowledge_base_request
-from backend.flow.smartsheet import handle_smartsheet_request
-from backend.policy.chat import (
+from backend.policy.payloads import (
     build_doc_binding_updated_payload,
     build_memory_loaded_payload,
     build_reply_generated_payload,
     build_request_received_payload,
+    build_route_payload,
     build_runtime_ready_payload,
+    build_selected_target,
     build_stop_reason_payload,
-    select_chat_route,
 )
-from backend.policy.routing import maybe_short_circuit_upload_followup
+from backend.policy.document import is_fresh_document_request
+from backend.policy.smartsheet import is_row_modification_request, build_unsupported_row_modify_reply
 from backend.runtime import MCPHost, load_mcp_server_configs_from_env
+from backend.runtime.local_tools import get_local_agent_tools
 from backend.state.store import (
     build_session_id,
+    current_bound_doc,
     generate_request_id,
-    latest_recent_candidate_list,
+    latest_uploaded_file,
     load_memory_context,
+    load_recent_chat_history,
     persist_doc_binding_from_tool_result,
     save_flow_event,
     save_tool_call,
@@ -34,18 +36,121 @@ from backend.state.store import (
 ChatResult = dict[str, Any]
 
 
-def _build_routing_context(session_id: str) -> str:
-    recent_candidates = latest_recent_candidate_list(session_id, candidate_type="knowledge_base") or {}
-    candidates = recent_candidates.get("candidates") or []
-    if not isinstance(candidates, list) or not candidates:
-        return ""
+def _tool_modifies_wecom_target(tool_name: str) -> bool:
+    name = str(tool_name or "").strip()
+    if not name:
+        return False
+    if name == "wecom_docs__create_doc":
+        return True
+    if name in {"doc__append_section", "doc__replace_section", "doc__expand_section"}:
+        return True
+    if name.startswith("wecom_docs__smartsheet_"):
+        return any(token in name for token in ("add_", "update_", "delete_"))
+    if name.startswith("wecom_docs__") and any(token in name for token in ("edit_doc_content", "edit_doc", "update_doc")):
+        return True
+    return False
 
-    lines = ["Recent knowledge-base candidates shown to the user:"]
-    for index, item in enumerate(candidates[:10], start=1):
-        if not isinstance(item, dict):
-            continue
-        lines.append(f"{index}. {item.get('file_name') or item.get('display_name') or ''}")
-    return "\n".join(lines)
+
+def _reply_has_wecom_link(reply: str) -> bool:
+    return "https://doc.weixin.qq.com/" in str(reply or "")
+
+
+def _append_bound_doc_link(reply: str, doc_url: str | None) -> str:
+    text = str(reply or "").rstrip()
+    url = str(doc_url or "").strip()
+    if not url or _reply_has_wecom_link(text):
+        return text
+    return f"{text}\n\n链接：{url}"
+
+
+def _use_local_rag_runtime(server_name: str) -> bool:
+    return str(server_name or "").strip().lower() == "llamaindex_rag"
+
+
+def _is_add_to_knowledge_base_request(content: str) -> bool:
+    text = str(content or "").strip()
+    if not text:
+        return False
+
+    if not any(token in text for token in ("知识库", "知识源", "知识库里")):
+        return False
+    if not any(token in text for token in ("加入", "添加", "放到", "纳入", "导入")):
+        return False
+    if not any(
+        token in text
+        for token in (
+            "这份文档",
+            "这个文件",
+            "刚上传的文件",
+            "刚才上传的文件",
+            "刚上传的 PDF",
+            "刚上传的pdf",
+            "这个 PDF",
+            "这个pdf",
+            "文档",
+            "文件",
+            "PDF",
+            "pdf",
+        )
+    ):
+        return False
+    if any(token in text for token in ("总结", "摘要", "生成", "分析", "文档必须包含")):
+        return False
+    return True
+
+
+def _build_agent_route_payload(content: str) -> tuple[bool, dict[str, Any]]:
+    include_bound_doc = not is_fresh_document_request(content)
+    route_detail = "fresh_document_request" if not include_bound_doc else "default_agent_flow"
+    route_reason = ["fresh_document_request"] if not include_bound_doc else ["default_text_message"]
+    route_payload = build_route_payload(
+        route_code="agent_chat",
+        route_detail=route_detail,
+        reasons=route_reason,
+        selected_target=build_selected_target(
+            "document" if include_bound_doc else "none",
+            None,
+            None,
+            clear_reason="fresh_document_request" if not include_bound_doc else "no_target_selected_at_route_time",
+        ),
+        clarify_needed=False,
+    )
+    return include_bound_doc, route_payload
+
+
+def _maybe_short_circuit_upload_followup(session_id: str, content: str) -> tuple[str, dict[str, Any]] | None:
+    if not _is_add_to_knowledge_base_request(content):
+        return None
+
+    latest_upload = latest_uploaded_file(session_id)
+    if not latest_upload:
+        return None
+
+    file_name = str(latest_upload["file_name"])
+    action = str(latest_upload["upload_action"])
+    matched_file_name = str(latest_upload.get("matched_file_name") or "").strip() or None
+
+    if action == "unchanged":
+        reply = f"刚加入知识库处理流程的 PDF `{file_name}` 已经在知识库里了，不需要重复添加。"
+    elif action == "duplicate_content":
+        if matched_file_name:
+            reply = f"刚加入知识库处理流程的 PDF `{file_name}` 与知识库中的 `{matched_file_name}` 内容完全一致，未重复加入。"
+        else:
+            reply = f"刚加入知识库处理流程的 PDF `{file_name}` 与知识库中的已有文件内容完全一致，未重复加入。"
+    elif action == "replaced":
+        reply = f"刚处理的 PDF `{file_name}` 已经更新到知识库了。"
+    else:
+        reply = f"刚处理的 PDF `{file_name}` 已经加入知识库了。"
+
+    payload = build_route_payload(
+        route_code="short_circuit",
+        route_detail="upload_followup_confirmation",
+        reasons=["knowledge_base_followup_detected", "recent_uploaded_file_found"],
+        selected_target=build_selected_target("knowledge_base_file", file_name, file_name),
+        guard_hits=[{"code": "upload_followup_guard", "detail": "ack_existing_upload"}],
+        clarify_needed=False,
+    )
+    return reply, payload
 
 
 def _summarize_args(args_dict: dict[str, Any]) -> dict[str, Any]:
@@ -61,6 +166,27 @@ def _summarize_args(args_dict: dict[str, Any]) -> dict[str, Any]:
         else:
             summary[key] = str(value)[:200]
     return summary
+
+
+def _build_short_message_routing_context(session_id: str, content: str) -> str:
+    """For very short messages (confirmations like '对', '好', '导出'), include the
+    last assistant reply so the intent classifier can resolve what's being confirmed."""
+    if len(content) > 10:
+        return ""
+    try:
+        from backend.state.store import _connect
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT content FROM conversation_turns "
+                "WHERE session_id = ? AND role = 'assistant' "
+                "ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if row:
+                return f"Last assistant reply: {str(row['content'])[:300]}"
+    except Exception:
+        pass
+    return ""
 
 
 async def run_chat(payload: dict[str, Any]) -> ChatResult:
@@ -84,65 +210,15 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
         save_turn(session_id, "user", user_text, request_id=request_id)
         user_turn_saved = True
 
-    def finalize_direct(result: dict[str, Any]) -> ChatResult:
-        reply = str(result["reply"])
-        save_user_turn_once(content)
-        for tool_call in result.get("tool_calls") or []:
-            if not isinstance(tool_call, dict):
-                continue
-            tool_name = str(tool_call.get("tool_name") or "").strip()
-            args_dict = dict(tool_call.get("args_dict") or {})
-            result_text = str(tool_call.get("result_text") or "")
-            if not tool_name:
-                continue
-            save_tool_call(session_id, tool_name, args_dict, result_text, request_id=request_id)
-            emit_flow(
-                "runtime",
-                "tool_called",
-                {
-                    "tool_name": tool_name,
-                    "args_summary": _summarize_args(args_dict),
-                    "result_summary": result_text[:300],
-                    "result_status": "failure"
-                    if any(token in result_text.lower() for token in ("error", "failed", "traceback", "authorization expired"))
-                    or ('"errcode":' in result_text and '"errcode": 0' not in result_text)
-                    else "success",
-                },
-            )
-            binding = persist_doc_binding_from_tool_result(
-                session_id=session_id,
-                request_id=request_id,
-                tool_name=tool_name,
-                args_dict=args_dict,
-                result_text=result_text,
-                last_user_text=content,
-            )
-            if binding:
-                emit_flow("state", "doc_binding_updated", build_doc_binding_updated_payload(binding))
-        save_turn(session_id, "assistant", reply, request_id=request_id)
-        emit_flow("flow", "route_selected", dict(result["route_payload"]))
-        emit_flow("entry", "reply_generated", build_reply_generated_payload(str(result["reply_type"]), reply))
-        emit_flow("flow", "stop_reason", dict(result["stop_reason"]))
-        response: ChatResult = {"reply": reply, "requestId": request_id}
-        attachment = result.get("attachment")
-        if attachment:
-            emit_flow(
-                "entry",
-                "attachment_prepared",
-                {
-                    "attachment_type": attachment.get("type"),
-                    "attachment_name": attachment.get("name"),
-                    "attachment_path": attachment.get("path"),
-                },
-            )
-            response["attachment"] = attachment
-        return response
-
     async def ensure_runtime() -> MCPHost | None:
         nonlocal mcp_runtime
         if mcp_runtime:
             return mcp_runtime
-        server_configs = load_mcp_server_configs_from_env()
+        server_configs = [
+            config
+            for config in load_mcp_server_configs_from_env()
+            if not _use_local_rag_runtime(config.name)
+        ]
         if not server_configs:
             return None
         mcp_runtime = MCPHost(server_configs)
@@ -159,14 +235,18 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
         *,
         include_bound_doc: bool,
         route_payload: dict[str, Any],
-        intent_packet: dict[str, Any] | None = None,
     ) -> ChatResult:
         runtime = await ensure_runtime()
+        tools = list(runtime.tools) if runtime else []
+        tools.extend(get_local_agent_tools())
         memory_context = load_memory_context(session_id, include_bound_doc=include_bound_doc)
         emit_flow("flow", "route_selected", route_payload)
         emit_flow("state", "memory_loaded", build_memory_loaded_payload(include_bound_doc, bool(memory_context)))
+        modified_bound_doc_url: str | None = None
+        modified_wecom_target = False
 
         def on_tool_result(tool_name: str, args_dict: dict[str, Any], result_text: str) -> None:
+            nonlocal modified_bound_doc_url, modified_wecom_target
             save_tool_call(session_id, tool_name, args_dict, result_text, request_id=request_id)
             binding = persist_doc_binding_from_tool_result(
                 session_id=session_id,
@@ -179,13 +259,38 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
             if not binding:
                 return
             emit_flow("state", "doc_binding_updated", build_doc_binding_updated_payload(binding))
+            if _tool_modifies_wecom_target(tool_name):
+                modified_wecom_target = True
+                modified_bound_doc_url = str(binding.get("doc_url") or "").strip() or modified_bound_doc_url
 
         save_user_turn_once(content)
+
+        routing_context = _build_short_message_routing_context(session_id, content)
+        intent_packet = await classify_intent_packet(
+            content,
+            memory_context=memory_context,
+            routing_context=routing_context,
+        )
+
+        if (
+            intent_packet.get("intent_family") == "smartsheet"
+            and is_row_modification_request(user_text)
+        ):
+            reply = build_unsupported_row_modify_reply()
+            save_turn(session_id, "assistant", reply, request_id=request_id)
+            emit_flow("flow", "intent_packet_created", intent_packet)
+            emit_flow("entry", "reply_generated", build_reply_generated_payload("unsupported_operation", reply))
+            emit_flow("flow", "stop_reason", build_stop_reason_payload("unsupported_operation", "row_modification_not_available"))
+            return {"reply": reply, "requestId": request_id}
+
+        chat_history = load_recent_chat_history(session_id, limit=10)
         agent = Agent(
             name="WeComBackendAgent",
             system_prompt=load_system_prompt(),
             mcp_client=runtime,
+            tools=tools,
             memory_context=memory_context,
+            chat_history=chat_history,
             intent_packet=intent_packet,
             on_tool_result=on_tool_result,
             on_flow_event=lambda event_name, event_payload: emit_flow("flow", event_name, event_payload),
@@ -210,14 +315,30 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
             emit_flow("flow", "stop_reason", build_stop_reason_payload("agent_timeout", "safe_reply_after_timeout"))
             return {"reply": reply, "requestId": request_id}
         reply = reply or "No response generated."
+        if modified_wecom_target:
+            bound_doc = current_bound_doc(session_id)
+            bound_doc_url = str((bound_doc or {}).get("doc_url") or "").strip() or None
+            reply = _append_bound_doc_link(reply, modified_bound_doc_url or bound_doc_url)
         save_turn(session_id, "assistant", reply, request_id=request_id)
         emit_flow("entry", "reply_generated", build_reply_generated_payload("assistant_final", reply))
-        return {"reply": reply, "requestId": request_id}
+        response: ChatResult = {"reply": reply, "requestId": request_id}
+        if agent.prepared_attachment:
+            emit_flow(
+                "entry",
+                "attachment_prepared",
+                {
+                    "attachment_type": agent.prepared_attachment.get("type"),
+                    "attachment_name": agent.prepared_attachment.get("name"),
+                    "attachment_path": agent.prepared_attachment.get("path"),
+                },
+            )
+            response["attachment"] = agent.prepared_attachment
+        return response
 
     try:
         emit_flow("entry", "request_received", build_request_received_payload("text", content_preview=content[:200]))
 
-        short_circuit = maybe_short_circuit_upload_followup(session_id, content)
+        short_circuit = _maybe_short_circuit_upload_followup(session_id, content)
         if short_circuit:
             reply, route_payload = short_circuit
             save_user_turn_once(content)
@@ -227,94 +348,11 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
             emit_flow("flow", "stop_reason", build_stop_reason_payload("short_circuit", "upload_followup_confirmation"))
             return {"reply": reply, "requestId": request_id}
 
-        routing_memory_context = load_memory_context(session_id, include_bound_doc=True)
-        routing_context = _build_routing_context(session_id)
-        intent_packet = await classify_intent_packet(
-            content,
-            memory_context=routing_memory_context,
-            routing_context=routing_context,
-        )
-        emit_flow("flow", "intent_packet_created", intent_packet)
-
-        if str(intent_packet.get("intent_family") or "").strip() == "smartsheet":
-            runtime_for_smartsheet = await ensure_runtime()
-            smartsheet_result = await handle_smartsheet_request(
-                session_id,
-                request_id,
-                content,
-                host=runtime_for_smartsheet,
-                intent_hint=intent_packet,
-            )
-            if smartsheet_result:
-                return finalize_direct(smartsheet_result)
-
-        if str(intent_packet.get("intent_family") or "").strip() == "knowledge_base":
-            kb_result = handle_knowledge_base_request(session_id, request_id, content, intent_hint=intent_packet)
-            if kb_result:
-                delegate_message = kb_result.get("delegate_message")
-                if delegate_message:
-                    route_payload = dict(kb_result["route_payload"])
-                    emit_flow(
-                        "flow",
-                        "delegate_message_prepared",
-                        {"delegate_preview": str(delegate_message)[:200]},
-                    )
-                    return await run_agent_flow(
-                        delegate_message,
-                        include_bound_doc=True,
-                        route_payload=route_payload,
-                        intent_packet=intent_packet,
-                    )
-                return finalize_direct(kb_result)
-
-        runtime_for_doc_ops = await ensure_runtime()
-        doc_result = await handle_document_operation_request(
-            session_id,
-            request_id,
-            content,
-            host=runtime_for_doc_ops,
-        )
-        if doc_result:
-            delegate_message = doc_result.get("delegate_message")
-            if delegate_message:
-                route_payload = dict(doc_result["route_payload"])
-                emit_flow(
-                    "flow",
-                    "delegate_message_prepared",
-                    {"delegate_preview": str(delegate_message)[:200]},
-                )
-                return await run_agent_flow(
-                    delegate_message,
-                    include_bound_doc=True,
-                    route_payload=route_payload,
-                    intent_packet=intent_packet,
-                )
-            return finalize_direct(doc_result)
-
-        kb_result = handle_knowledge_base_request(session_id, request_id, content, intent_hint=intent_packet)
-        if kb_result:
-            delegate_message = kb_result.get("delegate_message")
-            if delegate_message:
-                route_payload = dict(kb_result["route_payload"])
-                emit_flow(
-                    "flow",
-                    "delegate_message_prepared",
-                    {"delegate_preview": str(delegate_message)[:200]},
-                )
-                return await run_agent_flow(
-                    delegate_message,
-                    include_bound_doc=True,
-                    route_payload=route_payload,
-                    intent_packet=intent_packet,
-                )
-            return finalize_direct(kb_result)
-
-        include_bound_doc, route_payload = select_chat_route(content)
+        include_bound_doc, route_payload = _build_agent_route_payload(content)
         return await run_agent_flow(
             content,
             include_bound_doc=include_bound_doc,
             route_payload=route_payload,
-            intent_packet=intent_packet,
         )
     finally:
         if mcp_runtime:

@@ -48,7 +48,7 @@ def normalize_pdf_filename(filename: str) -> str:
 
 
 def upload_storage_name(filename: str) -> str:
-    return f"upload__{normalize_pdf_filename(filename)}"
+    return normalize_pdf_filename(filename)
 
 
 def knowledge_base_pdf_paths() -> list[Path]:
@@ -71,14 +71,7 @@ def absolute_project_path(relative_path: str) -> Path:
 
 
 def _display_name(path: Path) -> str:
-    name = path.name
-    if name.startswith("upload__"):
-        return name[len("upload__") :]
-    return name
-
-
-def _source_type(path: Path) -> str:
-    return "upload" if path.name.startswith("upload__") else "base"
+    return path.name
 
 
 def _tokenize(value: str) -> set[str]:
@@ -100,7 +93,6 @@ def _record_from_path(path: Path) -> dict[str, Any]:
         "file_name": _display_name(path),
         "stored_name": path.name,
         "stored_path": relative_project_path(path),
-        "source_type": _source_type(path),
     }
 
 
@@ -126,21 +118,14 @@ def _score_record(record: dict[str, Any], query: str) -> tuple[int, str]:
         score += 20 * len(overlap)
         reasons.append(f"关键词重合：{'、'.join(sorted(overlap)[:3])}")
 
-    if "刚上传" in query_text and record.get("source_type") == "upload":
-        score += 30
-        reasons.append("近期上传候选")
-
     if score <= 0:
         return (0, "")
     return (score, "；".join(reasons))
 
 
-def _list_records(source_type: str | None = None) -> list[dict[str, Any]]:
+def _list_records() -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for path in knowledge_base_pdf_paths():
-        current_source_type = _source_type(path)
-        if source_type and current_source_type != source_type:
-            continue
         records.append(_record_from_path(path))
     return records
 
@@ -149,40 +134,96 @@ def _recent_uploads(limit: int = 5) -> list[dict[str, Any]]:
     if not KNOWLEDGE_BASE_DIR.exists():
         return []
     paths = sorted(
-        (
-            path
-            for path in KNOWLEDGE_BASE_DIR.glob("upload__*.pdf")
-            if path.is_file()
-        ),
+        (path for path in KNOWLEDGE_BASE_DIR.glob("*.pdf") if path.is_file()),
         key=lambda item: item.stat().st_mtime,
         reverse=True,
     )
     return [_record_from_path(path) for path in paths[:limit]]
 
 
-def _find_record_by_file_name(file_name: str, *, source_type: str | None = None) -> dict[str, Any] | None:
+def _find_record_by_file_name(file_name: str) -> dict[str, Any] | None:
     normalized = str(file_name or "").strip().lower()
     if not normalized:
         return None
-    for record in _list_records(source_type=source_type):
+    for record in _list_records():
         if str(record["file_name"]).strip().lower() == normalized:
             return record
     return None
 
 
-def _match_records(query: str, *, limit: int = 10, source_type: str | None = None) -> list[dict[str, Any]]:
+def _load_file_aliases() -> dict[str, list[str]]:
+    """Load file aliases from recent assistant conversation turns.
+
+    Scans for patterns like "`2505.12540v4.pdf`（大模型推理优化）" in assistant
+    replies and builds a mapping of file_name -> [alias1, alias2, ...].
+    """
+    alias_map: dict[str, list[str]] = {}
+    alias_pattern = re.compile(
+        r'`?([0-9A-Za-z._-]+\.pdf)`?\s*[（(]\s*([^）)]+?)\s*[）)]',
+        re.IGNORECASE,
+    )
+    try:
+        import sqlite3
+        db_path = PROJECT_ROOT / "data" / "memory.sqlite3"
+        if not db_path.exists():
+            return alias_map
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT content FROM conversation_turns "
+            "WHERE role = 'assistant' "
+            "ORDER BY id DESC LIMIT 30"
+        ).fetchall()
+        conn.close()
+        for row in rows:
+            content = str(row["content"] or "")
+            for match in alias_pattern.finditer(content):
+                fname = match.group(1).strip()
+                alias = match.group(2).strip()
+                if fname and alias:
+                    alias_map.setdefault(fname, [])
+                    if alias not in alias_map[fname]:
+                        alias_map[fname].append(alias)
+    except Exception:
+        pass
+    return alias_map
+
+
+def _match_records(query: str, *, limit: int = 10) -> list[dict[str, Any]]:
     explicit_name = _explicit_pdf_reference(query)
     if explicit_name:
-        exact = _find_record_by_file_name(explicit_name, source_type=source_type)
+        exact = _find_record_by_file_name(explicit_name)
         if exact:
             enriched = dict(exact)
             enriched["match_reason"] = "文件名精确匹配"
             enriched["match_score"] = 1000
             return [enriched]
 
+    # Load aliases from conversation history
+    alias_map = _load_file_aliases()
+
     scored: list[tuple[int, str, dict[str, Any]]] = []
-    for record in _list_records(source_type=source_type):
+    for record in _list_records():
         score, reason = _score_record(record, query)
+
+        # Also check aliases for this file
+        file_name = str(record["file_name"])
+        aliases = alias_map.get(file_name, [])
+        query_lower = str(query or "").strip().lower()
+        for alias in aliases:
+            if query_lower in alias.lower() or alias.lower() in query_lower:
+                score += 200
+                reason = f"别名匹配：{alias}" + (f"；{reason}" if reason else "")
+                break
+            # Partial token overlap with alias
+            alias_tokens = _tokenize(alias)
+            query_tokens = _tokenize(query)
+            overlap = alias_tokens & query_tokens
+            if overlap:
+                score += 50 * len(overlap)
+                reason = f"别名关键词：{'、'.join(sorted(overlap)[:3])}" + (f"；{reason}" if reason else "")
+                break
+
         if score <= 0:
             continue
         enriched = dict(record)
@@ -199,7 +240,6 @@ def _resolve_record(
     record: dict[str, Any] | None = None,
     stored_path: str | None = None,
     file_name: str | None = None,
-    source_type: str | None = None,
 ) -> dict[str, Any]:
     if record:
         return dict(record)
@@ -209,14 +249,15 @@ def _resolve_record(
             raise FileNotFoundError(path)
         return _record_from_path(path)
     if file_name:
-        resolved = _find_record_by_file_name(file_name, source_type=source_type)
+        resolved = _find_record_by_file_name(file_name)
         if resolved:
             return resolved
     raise FileNotFoundError("knowledge-base record not found")
 
 
 def _can_rename(record: dict[str, Any]) -> bool:
-    return str(record.get("source_type") or "") == "upload"
+    _ = record
+    return True
 
 
 def _export_path(record: dict[str, Any]) -> Path:
@@ -269,8 +310,7 @@ def _store_upload(file_bytes: bytes, original_name: str) -> dict[str, str | None
     incoming_sha = sha256_bytes(file_bytes)
 
     if target_path.exists():
-        existing_bytes = target_path.read_bytes()
-        if sha256_bytes(existing_bytes) == incoming_sha:
+        if sha256_bytes(target_path.read_bytes()) == incoming_sha:
             return {
                 "file_name": _display_name(target_path),
                 "stored_path": relative_project_path(target_path),
@@ -307,27 +347,22 @@ def _store_upload(file_bytes: bytes, original_name: str) -> dict[str, str | None
 
 def execute_kb_action(action: str, **kwargs: Any) -> dict[str, Any]:
     if action == "kb.list":
-        scope = str(kwargs.get("scope") or "all")
-        source_type = scope if scope in {"upload", "base"} else None
-        records = _list_records(source_type=source_type)
-        return {"ok": True, "action": action, "scope": scope, "records": records, "total": len(records)}
+        records = _list_records()
+        return {"ok": True, "action": action, "records": records, "total": len(records)}
 
     if action == "kb.list_uploads":
         limit = int(kwargs.get("limit") or 5)
         records = _recent_uploads(limit=limit)
-        return {"ok": True, "action": action, "scope": "upload", "records": records, "total": len(records)}
+        return {"ok": True, "action": action, "scope": "recent", "records": records, "total": len(records)}
 
     if action == "kb.match_related":
         query = str(kwargs.get("query") or "").strip()
         limit = int(kwargs.get("limit") or 10)
-        scope = str(kwargs.get("scope") or "all")
-        source_type = scope if scope in {"upload", "base"} else None
-        records = _match_records(query, limit=limit, source_type=source_type)
+        records = _match_records(query, limit=limit)
         return {
             "ok": True,
             "action": action,
             "query": query,
-            "scope": scope,
             "records": records,
             "total": len(records),
         }
@@ -337,7 +372,6 @@ def execute_kb_action(action: str, **kwargs: Any) -> dict[str, Any]:
             record=kwargs.get("record"),
             stored_path=kwargs.get("stored_path"),
             file_name=kwargs.get("file_name"),
-            source_type=kwargs.get("source_type"),
         )
         path = _export_path(record)
         return {
@@ -353,7 +387,6 @@ def execute_kb_action(action: str, **kwargs: Any) -> dict[str, Any]:
             record=kwargs.get("record"),
             stored_path=kwargs.get("stored_path"),
             file_name=kwargs.get("file_name"),
-            source_type=kwargs.get("source_type"),
         )
         new_file_name = str(kwargs.get("new_file_name") or "").strip()
         result = _rename(record, new_file_name)
@@ -364,7 +397,6 @@ def execute_kb_action(action: str, **kwargs: Any) -> dict[str, Any]:
             record=kwargs.get("record"),
             stored_path=kwargs.get("stored_path"),
             file_name=kwargs.get("file_name"),
-            source_type=kwargs.get("source_type"),
         )
         result = _delete(record)
         return {"ok": True, "action": action, "record": record, "result": result}
@@ -387,7 +419,6 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subparsers.add_parser("list")
-    list_parser.add_argument("--scope", choices=["all", "upload", "base"], default="all")
     list_parser.add_argument("--json", action="store_true")
 
     uploads_parser = subparsers.add_parser("list-uploads")
@@ -397,7 +428,6 @@ def _build_parser() -> argparse.ArgumentParser:
     match_parser = subparsers.add_parser("match-related")
     match_parser.add_argument("--query", required=True)
     match_parser.add_argument("--limit", type=int, default=10)
-    match_parser.add_argument("--scope", choices=["all", "upload", "base"], default="all")
     match_parser.add_argument("--json", action="store_true")
 
     export_parser = subparsers.add_parser("export")
@@ -425,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "list":
-            result = execute_kb_action("kb.list", scope=args.scope)
+            result = execute_kb_action("kb.list")
         elif args.command == "list-uploads":
             result = execute_kb_action("kb.list_uploads", limit=args.limit)
         elif args.command == "match-related":
@@ -433,7 +463,6 @@ def main(argv: list[str] | None = None) -> int:
                 "kb.match_related",
                 query=args.query,
                 limit=args.limit,
-                scope=args.scope,
             )
         elif args.command == "export":
             result = execute_kb_action("kb.export", stored_path=args.stored_path, file_name=args.file)

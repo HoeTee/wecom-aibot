@@ -5,6 +5,7 @@ import re
 import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 
@@ -12,10 +13,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = PROJECT_ROOT / "data" / "memory.sqlite3"
 FLOW_LOG_DIR = PROJECT_ROOT / "data" / "logs" / "flow"
 FLOW_LOG_PATH = FLOW_LOG_DIR / "flow_runtime.log"
+RECENT_USER_TURN_LIMIT = 10
+RECENT_UPLOADED_FILE_LIMIT = 3
 
 DOC_ID_PATTERN = re.compile(r'(?i)(?:docid|doc_id)\b["\']?\s*[:=]\s*["\']?([A-Za-z0-9_-]+)')
 DOC_NAME_PATTERN = re.compile(r'(?i)(?:doc_name|docname)\b["\']?\s*[:=]\s*["\']?([^\n,"\'}]+)')
 DOC_URL_PATTERN = re.compile(r"(https?://[^\s'\"]+)")
+DOC_URL_HOSTS = {"doc.weixin.qq.com"}
+DOC_URL_PATH_PREFIXES = ("/doc/", "/smartsheet/")
 
 
 def _connect() -> sqlite3.Connection:
@@ -43,6 +48,31 @@ def _short_text(value: Any, limit: int = 500) -> str:
     return text[: limit - 3] + "..."
 
 
+def _summarize_tool_args_dict(args_dict: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key, value in args_dict.items():
+        if key == "content":
+            text = str(value or "").strip()
+            summary["content_preview"] = _short_text(text, limit=120)
+            summary["content_length"] = len(text)
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            summary[key] = value
+        else:
+            summary[key] = _short_text(_json_dumps(value), limit=120)
+    return summary
+
+
+def _tool_result_status(result_excerpt: str) -> str:
+    text = str(result_excerpt or "")
+    lowered = text.lower()
+    if any(token in lowered for token in ("error", "failed", "traceback")):
+        return "failure"
+    if '"errcode":' in text and '"errcode": 0' not in text:
+        return "failure"
+    return "success"
+
+
 def _find_first_value(data: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     for key in keys:
         value = data.get(key)
@@ -59,6 +89,69 @@ def _extract_with_pattern(pattern: re.Pattern[str], text: str) -> str | None:
     if not match:
         return None
     return match.group(1).strip().strip('"').strip("'")
+
+
+def _parse_json_payload(text: str) -> dict[str, Any]:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return {}
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        start = raw_text.find("{")
+        end = raw_text.rfind("}") + 1
+        if start == -1 or end <= start:
+            return {}
+        try:
+            payload = json.loads(raw_text[start:end])
+        except json.JSONDecodeError:
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _normalize_doc_url(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.netloc.lower() not in DOC_URL_HOSTS:
+        return None
+    if not parsed.path.startswith(DOC_URL_PATH_PREFIXES):
+        return None
+    return text
+
+
+def _extract_doc_url_from_payload(payload: dict[str, Any]) -> str | None:
+    for key in ("doc_url", "docUrl", "url"):
+        doc_url = _normalize_doc_url(payload.get(key))
+        if doc_url:
+            return doc_url
+
+    data = payload.get("data")
+    if isinstance(data, dict):
+        for key in ("doc_url", "docUrl", "url"):
+            doc_url = _normalize_doc_url(data.get(key))
+            if doc_url:
+                return doc_url
+    return None
+
+
+def _extract_doc_url(tool_name: str, args_dict: dict[str, Any], result_text: str) -> str | None:
+    for key in ("docurl", "doc_url", "docUrl", "url"):
+        doc_url = _normalize_doc_url(args_dict.get(key))
+        if doc_url:
+            return doc_url
+
+    doc_url = _extract_doc_url_from_payload(_parse_json_payload(result_text))
+    if doc_url:
+        return doc_url
+
+    if str(tool_name or "").strip().endswith("create_doc"):
+        return _normalize_doc_url(_extract_with_pattern(DOC_URL_PATTERN, result_text))
+    return None
 
 
 def init_db() -> None:
@@ -110,25 +203,6 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
-            CREATE TABLE IF NOT EXISTS flow_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                request_id TEXT NOT NULL,
-                layer_at_event TEXT NOT NULL,
-                event_name TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS session_pending_actions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                request_id TEXT,
-                action_type TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                resolved_at TEXT
-            );
             """
         )
         _ensure_column(conn, "conversation_turns", "request_id", "TEXT")
@@ -221,21 +295,6 @@ def save_flow_event(
     if not session_id or not request_id or not layer_at_event or not event_name:
         return
 
-    with _connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO flow_events (session_id, request_id, layer_at_event, event_name, payload_json)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                session_id,
-                request_id,
-                layer_at_event,
-                event_name,
-                _json_dumps(payload),
-            ),
-        )
-        conn.commit()
     FLOW_LOG_DIR.mkdir(parents=True, exist_ok=True)
     with FLOW_LOG_PATH.open("a", encoding="utf-8") as handle:
         handle.write(
@@ -254,13 +313,11 @@ def save_flow_event(
 
 def extract_doc_binding(tool_name: str, args_dict: dict[str, Any], result_text: str) -> dict[str, str | None] | None:
     doc_id = _find_first_value(args_dict, ("docid", "doc_id", "docId"))
-    doc_url = _find_first_value(args_dict, ("docurl", "doc_url", "docUrl"))
+    doc_url = _extract_doc_url(tool_name, args_dict, result_text)
     doc_name = _find_first_value(args_dict, ("doc_name", "docName", "docname", "doc_name_or_title"))
 
     if not doc_id:
         doc_id = _extract_with_pattern(DOC_ID_PATTERN, result_text)
-    if not doc_url:
-        doc_url = _extract_with_pattern(DOC_URL_PATTERN, result_text)
     if not doc_name:
         doc_name = _extract_with_pattern(DOC_NAME_PATTERN, result_text)
 
@@ -429,38 +486,6 @@ def latest_uploaded_file(session_id: str, within_minutes: int = 30) -> dict[str,
     return dict(row) if row else None
 
 
-def update_uploaded_file_reference(old_stored_path: str, new_file_name: str, new_stored_path: str) -> None:
-    old_stored_path = str(old_stored_path or "").strip()
-    new_file_name = str(new_file_name or "").strip()
-    new_stored_path = str(new_stored_path or "").strip()
-    if not old_stored_path or not new_file_name or not new_stored_path:
-        return
-
-    with _connect() as conn:
-        conn.execute(
-            """
-            UPDATE session_uploaded_files
-            SET file_name = ?,
-                stored_path = ?,
-                matched_stored_path = CASE
-                    WHEN matched_stored_path = ? THEN ?
-                    ELSE matched_stored_path
-                END
-            WHERE stored_path = ?
-               OR matched_stored_path = ?
-            """,
-            (
-                new_file_name,
-                new_stored_path,
-                old_stored_path,
-                new_stored_path,
-                old_stored_path,
-                old_stored_path,
-            ),
-        )
-        conn.commit()
-
-
 def current_bound_doc(session_id: str) -> dict[str, Any] | None:
     session_id = str(session_id or "").strip()
     if not session_id:
@@ -481,175 +506,170 @@ def current_bound_doc(session_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def recent_bound_docs(session_id: str, limit: int = 5) -> list[dict[str, Any]]:
+def _load_recent_turn_states(conn: sqlite3.Connection, session_id: str, *, limit: int) -> list[dict[str, Any]]:
+    user_rows = conn.execute(
+        """
+        SELECT id, request_id, content, created_at
+        FROM conversation_turns
+        WHERE session_id = ?
+          AND role = 'user'
+          AND created_at >= datetime('now', '-7 day')
+        ORDER BY id DESC, created_at DESC
+        LIMIT ?
+        """,
+        (session_id, limit),
+    ).fetchall()
+
+    turn_states: list[dict[str, Any]] = []
+    for row in reversed(user_rows):
+        request_id = str(row["request_id"] or "").strip() or None
+        assistant_reply: str | None = None
+        tool_entries: list[str] = []
+
+        if request_id:
+            assistant_row = conn.execute(
+                """
+                SELECT content
+                FROM conversation_turns
+                WHERE session_id = ?
+                  AND request_id = ?
+                  AND role = 'assistant'
+                ORDER BY id DESC, created_at DESC
+                LIMIT 1
+                """,
+                (session_id, request_id),
+            ).fetchone()
+            if assistant_row:
+                assistant_reply = str(assistant_row["content"] or "").strip() or None
+
+            tool_rows = conn.execute(
+                """
+                SELECT tool_name, result_excerpt
+                FROM tool_calls
+                WHERE session_id = ?
+                  AND request_id = ?
+                ORDER BY id ASC, created_at ASC
+                LIMIT 10
+                """,
+                (session_id, request_id),
+            ).fetchall()
+            for tool_row in tool_rows:
+                status = _tool_result_status(str(tool_row['result_excerpt'] or ''))
+                tool_entries.append(f"{tool_row['tool_name']}({status})")
+
+        turn_states.append(
+            {
+                "request_id": request_id,
+                "user": str(row["content"] or "").strip(),
+                "assistant": assistant_reply,
+                "tools": tool_entries,
+            }
+        )
+
+    return turn_states
+
+
+def load_recent_chat_history(session_id: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    """Load recent conversation turns with tool calls as proper chat messages.
+
+    Reconstructs the full message chain per request:
+      1. {"role": "user", "content": ...}
+      2. {"role": "assistant", "content": null, "tool_calls": [...]}  (if tools were used)
+      3. {"role": "tool", "tool_call_id": ..., "content": ...}       (per tool call)
+      4. {"role": "assistant", "content": ...}                        (final reply)
+
+    Returns messages in chronological order.
+    """
     session_id = str(session_id or "").strip()
     if not session_id:
         return []
 
     with _connect() as conn:
-        rows = conn.execute(
+        user_rows = conn.execute(
             """
-            SELECT request_id, doc_id, doc_url, doc_name, last_tool_name, last_user_text, updated_at
-            FROM session_docs
+            SELECT request_id, content
+            FROM conversation_turns
             WHERE session_id = ?
-            ORDER BY updated_at DESC, id DESC
+              AND role = 'user'
+              AND created_at >= datetime('now', '-7 day')
+            ORDER BY id DESC
             LIMIT ?
             """,
-            (session_id, int(limit)),
+            (session_id, limit),
         ).fetchall()
 
-    return [dict(row) for row in rows]
+        if not user_rows:
+            return []
 
+        messages: list[dict[str, Any]] = []
+        for row in reversed(user_rows):
+            request_id = str(row["request_id"] or "").strip() or None
+            user_content = str(row["content"] or "").strip()
+            if not user_content:
+                continue
 
-def save_pending_action(
-    session_id: str,
-    action_type: str,
-    payload: dict[str, Any],
-    request_id: str | None = None,
-) -> None:
-    session_id = str(session_id or "").strip()
-    action_type = str(action_type or "").strip()
-    request_id = str(request_id or "").strip() or None
-    if not session_id or not action_type:
-        return
+            messages.append({"role": "user", "content": user_content})
 
-    with _connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO session_pending_actions (session_id, request_id, action_type, payload_json)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                session_id,
-                request_id,
-                action_type,
-                _json_dumps(payload),
-            ),
-        )
-        conn.commit()
+            if not request_id:
+                continue
 
+            tool_rows = conn.execute(
+                """
+                SELECT tool_name, args_json, result_excerpt
+                FROM tool_calls
+                WHERE session_id = ? AND request_id = ?
+                ORDER BY id ASC
+                LIMIT 10
+                """,
+                (session_id, request_id),
+            ).fetchall()
 
-def latest_pending_action(
-    session_id: str,
-    *,
-    action_type: str | None = None,
-    within_minutes: int = 120,
-) -> dict[str, Any] | None:
-    session_id = str(session_id or "").strip()
-    action_type = str(action_type or "").strip() or None
-    if not session_id:
-        return None
+            if tool_rows:
+                tool_calls_list = []
+                tool_results = []
+                for idx, tool_row in enumerate(tool_rows):
+                    call_id = f"hist_{request_id[:8]}_{idx}"
+                    tool_name = str(tool_row["tool_name"] or "")
+                    args_raw = str(tool_row["args_json"] or "{}")
+                    result_raw = str(tool_row["result_excerpt"] or "")
 
-    query = """
-        SELECT id, request_id, action_type, payload_json, created_at
-        FROM session_pending_actions
-        WHERE session_id = ?
-          AND resolved_at IS NULL
-          AND created_at >= datetime('now', ?)
-    """
-    params: list[Any] = [session_id, f"-{int(within_minutes)} minute"]
-    if action_type:
-        query += " AND action_type = ?"
-        params.append(action_type)
-    query += " ORDER BY id DESC LIMIT 1"
+                    tool_calls_list.append({
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": args_raw,
+                        },
+                    })
+                    tool_results.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": result_raw,
+                    })
 
-    with _connect() as conn:
-        row = conn.execute(query, tuple(params)).fetchone()
+                messages.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": tool_calls_list,
+                })
+                messages.extend(tool_results)
 
-    if not row:
-        return None
+            assistant_row = conn.execute(
+                """
+                SELECT content
+                FROM conversation_turns
+                WHERE session_id = ? AND request_id = ? AND role = 'assistant'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (session_id, request_id),
+            ).fetchone()
+            if assistant_row:
+                reply = str(assistant_row["content"] or "").strip()
+                if reply:
+                    messages.append({"role": "assistant", "content": reply})
 
-    payload_json = row["payload_json"]
-    try:
-        payload = json.loads(payload_json)
-    except json.JSONDecodeError:
-        payload = {}
-
-    return {
-        "id": row["id"],
-        "request_id": row["request_id"],
-        "action_type": row["action_type"],
-        "payload": payload,
-        "created_at": row["created_at"],
-    }
-
-
-def resolve_pending_action(action_id: int) -> None:
-    with _connect() as conn:
-        conn.execute(
-            """
-            UPDATE session_pending_actions
-            SET resolved_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (int(action_id),),
-        )
-        conn.commit()
-
-
-def resolve_all_pending_actions(session_id: str, action_type: str | None = None) -> None:
-    session_id = str(session_id or "").strip()
-    action_type = str(action_type or "").strip() or None
-    if not session_id:
-        return
-
-    query = """
-        UPDATE session_pending_actions
-        SET resolved_at = CURRENT_TIMESTAMP
-        WHERE session_id = ?
-          AND resolved_at IS NULL
-    """
-    params: list[Any] = [session_id]
-    if action_type:
-        query += " AND action_type = ?"
-        params.append(action_type)
-
-    with _connect() as conn:
-        conn.execute(query, tuple(params))
-        conn.commit()
-
-
-def save_recent_candidate_list(
-    session_id: str,
-    request_id: str | None,
-    candidate_type: str,
-    candidates: list[dict[str, Any]],
-) -> None:
-    session_id = str(session_id or "").strip()
-    candidate_type = str(candidate_type or "").strip()
-    if not session_id or not candidate_type:
-        return
-
-    resolve_all_pending_actions(session_id, action_type="recent_candidates")
-    save_pending_action(
-        session_id,
-        "recent_candidates",
-        {
-            "candidate_type": candidate_type,
-            "candidates": candidates,
-        },
-        request_id=request_id,
-    )
-
-
-def latest_recent_candidate_list(
-    session_id: str,
-    *,
-    candidate_type: str | None = None,
-    within_minutes: int = 120,
-) -> dict[str, Any] | None:
-    pending = latest_pending_action(
-        session_id,
-        action_type="recent_candidates",
-        within_minutes=within_minutes,
-    )
-    if not pending:
-        return None
-
-    payload = dict(pending.get("payload") or {})
-    if candidate_type and str(payload.get("candidate_type") or "").strip() != str(candidate_type).strip():
-        return None
-    return payload
+    return messages
 
 
 def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
@@ -670,18 +690,7 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
             (session_id,),
         ).fetchall()
 
-        user_turns = conn.execute(
-            """
-            SELECT content
-            FROM conversation_turns
-            WHERE session_id = ?
-              AND role = 'user'
-              AND created_at >= datetime('now', '-7 day')
-            ORDER BY created_at DESC
-            LIMIT 3
-            """,
-            (session_id,),
-        ).fetchall()
+        turn_states = _load_recent_turn_states(conn, session_id, limit=RECENT_USER_TURN_LIMIT)
 
         uploaded_files = conn.execute(
             """
@@ -690,10 +699,10 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
             FROM session_uploaded_files
             WHERE session_id = ?
               AND created_at >= datetime('now', '-7 day')
-            ORDER BY id DESC
-            LIMIT 3
+            ORDER BY id DESC, created_at DESC
+            LIMIT ?
             """,
-            (session_id,),
+            (session_id, RECENT_UPLOADED_FILE_LIMIT),
         ).fetchall()
 
     sections: list[str] = []
@@ -718,60 +727,39 @@ def load_memory_context(session_id: str, include_bound_doc: bool = True) -> str:
             )
         sections.append("\n".join(doc_lines))
 
-    if user_turns:
-        turn_lines = ["Recent user requests:"]
-        for row in reversed(user_turns):
-            turn_lines.append(f"- user: {_short_text(row['content'], limit=300)}")
+    if turn_states:
+        turn_lines = [
+            "Recent conversation turns (historical, not source-of-truth):",
+        ]
+        for turn in turn_states:
+            user_text = _short_text(turn['user'], limit=120)
+            tools = list(turn.get("tools") or [])
+            assistant_reply = _short_text(str(turn.get("assistant") or ""), limit=100)
+            tool_summary = "; ".join(tools[:5]) if tools else "no tools"
+            line = f"- user: {user_text} → [{tool_summary}]"
+            if assistant_reply:
+                line += f" → reply: {assistant_reply}"
+            turn_lines.append(line)
         sections.append("\n".join(turn_lines))
 
     if uploaded_files:
-        upload_lines = ["Recent uploaded files:"]
+        upload_lines = ["Recent uploads to knowledge base:"]
         for row in reversed(uploaded_files):
-            upload_lines.append(
-                f"- file_name={row['file_name']}; "
-                f"stored_path={row['stored_path']}; "
-                f"action={row['upload_action']}; "
-                f"matched_file_name={row['matched_file_name'] or ''}; "
-                f"matched_stored_path={row['matched_stored_path'] or ''}"
-            )
+            entry = f"- {row['file_name']} ({row['upload_action']})"
+            matched = str(row['matched_file_name'] or '').strip()
+            if matched:
+                entry += f" matched={matched}"
+            upload_lines.append(entry)
         sections.append("\n".join(upload_lines))
 
     if not sections:
         return ""
 
     return (
-        "Session memory from this same WeCom conversation.\n"
-        "Rule: when the user refers to the previous or last document, prefer the currently bound doc_id recorded here unless the user explicitly asks for a new document.\n\n"
+        "Session memory (internal context only — never cite this data in replies).\n"
+        "Use this to understand conversation history and resolve references like '上一个文档'.\n"
+        "Do NOT mention tool names, request IDs, file paths, or other internal details from this memory in your reply to the user.\n\n"
         + "\n\n".join(sections)
     )
 
 
-def latest_route_selection(session_id: str, within_minutes: int = 30) -> dict[str, Any] | None:
-    session_id = str(session_id or "").strip()
-    if not session_id:
-        return None
-
-    with _connect() as conn:
-        row = conn.execute(
-            """
-            SELECT request_id, payload_json, created_at
-            FROM flow_events
-            WHERE session_id = ?
-              AND event_name = 'route_selected'
-              AND created_at >= datetime('now', ?)
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (session_id, f"-{int(within_minutes)} minute"),
-        ).fetchone()
-
-    if not row:
-        return None
-
-    try:
-        payload = json.loads(row["payload_json"] or "{}")
-    except json.JSONDecodeError:
-        payload = {}
-    payload["request_id"] = row["request_id"]
-    payload["created_at"] = row["created_at"]
-    return payload

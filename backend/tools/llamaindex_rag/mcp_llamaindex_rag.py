@@ -1,10 +1,10 @@
-import os
 import sys
 import traceback
 from pathlib import Path
 
-from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+from backend.tools.llamaindex_rag.runtime import search_local_rag, summarize_local_rag
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 LOG_DIR = PROJECT_ROOT / "data" / "logs" / "mcp"
@@ -18,56 +18,40 @@ def _configure_stderr_log() -> None:
 
 
 _configure_stderr_log()
-load_dotenv(PROJECT_ROOT / ".env")
 
 mcp = FastMCP("llamaindex_rag")
-_rag_engine = None
-
-
-def _build_rag_engine():
-    from backend.tools.llamaindex_rag.llamaindex.engine import LlamaIndexRAGEngine
-
-    return LlamaIndexRAGEngine(
-        llm_api_key=os.getenv("LLM_API_KEY"),
-        llm_base_url=os.getenv("LLM_BASE_URL"),
-        llm_model=os.getenv("LLM_MODEL"),
-        embed_api_key=os.getenv("EMBED_API_KEY"),
-        embed_base_url=os.getenv("EMBED_BASE_URL"),
-        embed_model=os.getenv("EMBED_MODEL"),
-        rerank_api_key=os.getenv("RERANK_API_KEY"),
-        rerank_base_url=os.getenv("RERANK_BASE_URL"),
-        rerank_model=os.getenv("RERANK_MODEL"),
-    )
-
-
-def _get_rag_engine():
-    global _rag_engine
-
-    if _rag_engine is None:
-        try:
-            _rag_engine = _build_rag_engine()
-        except Exception as exc:  # pragma: no cover - defensive logging path
-            traceback.print_exc(file=sys.stderr)
-            raise RuntimeError(
-                f"Failed to initialize llamaindex_rag engine. "
-                f"See stderr log: {STDERR_LOG_PATH}. Root cause: {exc}"
-            ) from exc
-
-    return _rag_engine
 
 
 @mcp.tool()
-async def llamaindex_rag_query(query: str) -> str:
+async def llamaindex_rag_search(query: str) -> str:
     """
-    Query the local PDF knowledge base and return:
-    1. a synthesized answer across the PDFs
-    2. supporting evidence snippets for grounding
+    Search the local PDF knowledge base for specific facts, sections, and evidence passages.
+    Use this for targeted retrieval questions, not whole-knowledge-base summaries.
+    """
+    try:
+        return search_local_rag(query)
+    except Exception as exc:  # pragma: no cover - defensive logging path
+        traceback.print_exc(file=sys.stderr)
+        raise RuntimeError(
+            f"Failed to search llamaindex_rag locally. "
+            f"See stderr log: {STDERR_LOG_PATH}. Root cause: {exc}"
+        ) from exc
 
-    Use this tool for source-based summarization, comparison, and document drafting.
-    For summary requests, prefer structured output that can be turned into:
-    背景、每篇论文摘要、横向对比、结论与建议。
+
+@mcp.tool()
+async def llamaindex_rag_summarize(query: str) -> str:
     """
-    return _get_rag_engine().query(query)
+    Summarize one file, multiple files, or the whole local PDF knowledge base.
+    Use this for overviews, synthesis, and document drafting source material.
+    """
+    try:
+        return summarize_local_rag(query)
+    except Exception as exc:  # pragma: no cover - defensive logging path
+        traceback.print_exc(file=sys.stderr)
+        raise RuntimeError(
+            f"Failed to summarize llamaindex_rag locally. "
+            f"See stderr log: {STDERR_LOG_PATH}. Root cause: {exc}"
+        ) from exc
 
 
 if __name__ == "__main__":

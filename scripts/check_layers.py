@@ -15,9 +15,8 @@ LAYER_DEFINITIONS = [
     ("policy", ("backend.policy",)),
     ("state", ("backend.memory", "backend.state")),
     ("caps", ("backend.caps",)),
-    ("runtime", ("backend.runtime", "backend.mcp_client")),
-    ("tools", ("backend.tools", "backend.mcp_server_local")),
-    ("he", ("he",)),
+    ("runtime", ("backend.runtime",)),
+    ("tools", ("backend.tools",)),
 ]
 
 LAYER_ORDER = {
@@ -28,7 +27,6 @@ LAYER_ORDER = {
     "caps": 5,
     "runtime": 6,
     "tools": 7,
-    "he": 8,
 }
 
 
@@ -45,7 +43,7 @@ def _layer_for_module(module_name: str) -> str | None:
 
 
 def _iter_python_files() -> list[Path]:
-    roots = [PROJECT_ROOT / "backend", PROJECT_ROOT / "he"]
+    roots = [PROJECT_ROOT / "backend"]
     return sorted(path for root in roots if root.exists() for path in root.rglob("*.py"))
 
 
@@ -79,16 +77,12 @@ def _suggested_refactor_for_rule(rule_id: str) -> dict[str, Any]:
             "primary": {"layer": "policy", "directory": "backend/policy/"},
             "secondary": {"layer": "caps", "directory": "backend/caps/"},
         },
-        "production_imports_he": {
-            "primary": {"layer": "he", "directory": "he/"},
-            "secondary": {"layer": "docs", "directory": "docs/"},
-        },
         "flow_imports_tools_directly": {
             "primary": {"layer": "runtime", "directory": "backend/runtime/"},
             "secondary": {"layer": "caps", "directory": "backend/caps/"},
         },
         "mcp_wrapper_missing_entrypoint": {
-            "primary": {"layer": "tools", "directory": "backend/mcp_server_local/"},
+            "primary": {"layer": "tools", "directory": "backend/tools/"},
             "secondary": {"layer": "runtime", "directory": "backend/runtime/"},
         },
     }
@@ -102,7 +96,7 @@ def _suggested_refactor_for_rule(rule_id: str) -> dict[str, Any]:
 
 
 def _iter_stdio_wrapper_files() -> list[Path]:
-    wrapper_root = PROJECT_ROOT / "backend" / "mcp_server_local"
+    wrapper_root = PROJECT_ROOT / "backend" / "tools"
     if not wrapper_root.exists():
         return []
     return sorted(path for path in wrapper_root.rglob("mcp_*.py"))
@@ -156,10 +150,7 @@ def run_layer_checks(project_root: Path | None = None) -> dict[str, Any]:
             rule_id: str | None = None
             violated_rule: str | None = None
 
-            if source_layer != "he" and target_layer == "he":
-                rule_id = "production_imports_he"
-                violated_rule = "生产代码不能依赖 HE 层。"
-            elif source_layer == "flow" and target_layer == "tools":
+            if source_layer == "flow" and target_layer == "tools":
                 rule_id = "flow_imports_tools_directly"
                 violated_rule = "flow 层不能直接依赖 tools 层。"
             elif LAYER_ORDER[source_layer] > LAYER_ORDER[target_layer]:
