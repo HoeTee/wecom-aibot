@@ -4,13 +4,13 @@
 
 核心闭环：
 
-1. 读取用户输入
-2. 检索或总结来源材料
-3. 创建或编辑企业微信文档
-4. 通过 `doc_id`、`doc_url`、`doc_name` 维持文档连续性
-5. 通过独立的 `he/` 层做回归和检查
+1. 接收企微文本消息或 PDF 上传
+2. 结合知识库、会话状态和外部 MCP 能力理解请求
+3. 创建或更新企业微信文档 / 智能表格
+4. 通过 `doc_id`、`doc_url`、`doc_name` 维持连续性
+5. 通过 SQLite 和记日志保存最近上传状态、tool 调用和最终回复
 
-`AGENTS.md` 只做索引，不做长手册。
+`AGENTS.md` 只做索引，不写长手册。
 
 ## Source Of Record
 
@@ -24,11 +24,10 @@
 - [docs/FLOWS.md](/C:/Users/18014/wecom-aibot/docs/FLOWS.md)
 - [docs/CHECKS.md](/C:/Users/18014/wecom-aibot/docs/CHECKS.md)
 - [docs/EVALS.md](/C:/Users/18014/wecom-aibot/docs/EVALS.md)
-- [he/gates/global.yaml](/C:/Users/18014/wecom-aibot/he/gates/global.yaml)
 
-## 目录约定
+## 当前目录约定
 
-运行时层级：
+运行时目录：
 
 - `backend/entry`
 - `backend/flow`
@@ -37,24 +36,33 @@
 - `backend/caps`
 - `backend/runtime`
 - `backend/tools`
+- `gateway`
+- `scripts`
+- `docs`
 
-独立 HE 层：
+运行时数据目录：
 
-- `he/`
+- `data/`
+- `knowledge_base/`
 
-稳定入口文件名不改：
+当前工作树里没有 `he/` 目录；如果看到旧文档提到 `he/`，请按历史设计说明理解，不要把它当作当前必改目录。
+
+## 稳定入口文件名
 
 - `backend/app.py`
 - `backend/agent.py`
 - `backend/memory.py`
-- `scripts/run_eval_case.py`
+- `backend/entry/http.py`
+- `backend/flow/chat.py`
+- `backend/flow/upload.py`
 - `scripts/check_layers.py`
 - `scripts/mcp_test.py`
+- `scripts/cleanup_artifacts.py`
 - `gateway/long_connection.ts`
 
 ## 可修改文件
 
-正常迭代可以修改：
+正常迭代优先改这些位置：
 
 - `prompts/system/*`
 - `backend/app.py`
@@ -68,29 +76,30 @@
 - `backend/runtime/*`
 - `backend/tools/*`
 - `docs/*.md`
-- `he/gates/*`
-- `he/scenarios/*`
-- `he/review_template.md`
 - `README.md`
 - `.gitignore`
 
-## 非必要不要修改的文件
+## 非必要不要修改
 
 - `knowledge_base/*.pdf`
 - `config/mcp_servers.json`
-- `gateway/long_connection.ts`
 - `data/`
-- `he/runs/`
-- `he/reports/`
+- `gateway/long_connection.ts`
 
 ## 迭代规则
 
 一次只改一个主要层面：
 
 - prompt
-- flow
-- policy / state
+- flow / policy / state
 - runtime / tools
-- HE checks
+- docs
 
-改完后必须重跑固定场景，再比较结果。
+改代码后至少做这些检查：
+
+- 跑相关单测
+- 运行 `python scripts/check_layers.py`
+
+如果只是改文档：
+
+- 重点检查交叉引用、目录名、脚本名和当前工作树是否一致

@@ -2,349 +2,282 @@
 
 ## 目的
 
-这份文档定义仓库的运行时层级，以及独立的 HE 层。
+这份文档只描述当前仓库里已经存在的运行时结构，不写未来规划。
 
-目标不是为了追求形式上的“好看”，而是为了：
+## 顶层组件
 
-- 让职责边界清楚
-- 让 hook 和 evaluator 有稳定落点
-- 让层级检查有真实目录可查
-- 让后续重构和回归有明确参照
+当前工作树里的主要组件是：
 
-## 两套结构
+- `gateway/long_connection.ts`
+- `backend/app.py`
+- `backend/entry/http.py`
+- `backend/flow/*`
+- `backend/policy/*`
+- `backend/state/*`
+- `backend/caps/*`
+- `backend/runtime/*`
+- `backend/tools/*`
+- `scripts/*`
 
-这个仓库同时存在两套结构：
+当前仓库里没有 `he/` 目录；如果其它文档提到 HE，请按“历史设计说明”理解，而不要把它当成当前工作树的一部分。
 
-1. 运行时层级
-2. 独立的 HE 层
+## 两条入口链路
 
-两者不是同一套东西。
+### 1. 文本消息链路
 
-### 运行时层级
+入口：
 
-运行时按这七层理解：
+- 企业微信消息
+- `gateway/long_connection.ts`
+- `POST /chat`
 
-- `entry`
-- `flow`
-- `policy`
-- `state`
-- `caps`
-- `runtime`
-- `tools`
+实际顺序：
 
-### 独立 HE 层
+1. 网关把文本消息转成 `ChatRequest`
+2. `backend/entry/http.py` 调 `backend.flow.chat.run_chat`
+3. `run_chat` 生成 `request_id` 和 `session_id`
+4. 先检查是否命中“最近上传 PDF 的 follow-up 确认”短路逻辑
+5. 决定是否把当前绑定文档注入 memory
+6. 连接外部 MCP，并拼接本地 KB/doc/RAG 工具
+7. 从 SQLite 读取当前绑定文档、最近对话、最近上传文件
+8. 调 LLM 生成结构化 `intent packet`
+9. 进入 agent tool loop
+10. 持久化 tool call、文档绑定、最终回复
 
-`he` 不属于运行时七层。  
-它是外部验证和回归层。
+### 2. PDF 上传链路
 
-## 一句话关系
+入口：
 
-- `entry receives`
-- `flow orchestrates`
-- `policy governs`
-- `state provides`
-- `caps define`
-- `runtime dispatches`
-- `tools execute`
-- `he evaluates`
+- 企业微信文件消息
+- `gateway/long_connection.ts`
+- `POST /knowledge-base/upload`
 
-## 各层职责
+实际顺序：
 
-### 1. `entry`
+1. 网关下载文件
+2. `backend/flow/upload.py` 校验扩展名和 PDF 文件头
+3. 调 `backend.caps.knowledge_base.store_pdf_in_knowledge_base`
+4. 写入 `knowledge_base/`
+5. 保存最近上传状态到 `session_uploaded_files`
+6. 返回上传结果给用户
 
-职责：
+## 运行时层级
 
-- 接收输入
-- 传递输入
-- 返回输出
+### `entry`
 
 当前对应：
 
 - `backend/app.py`
-- `backend/entry/*`
+- `backend/entry/http.py`
 - `gateway/long_connection.ts`
-
-这一层不负责真正业务判断。
-
-### 2. `flow`
 
 职责：
 
-- 决定下一步走哪条流程
-- 决定是否 short-circuit
-- 决定是否先澄清
-- 决定调用哪些能力
+- 接收外部输入
+- 调用后端入口
+- 返回文本回复或文件附件
+
+### `flow`
 
 当前对应：
 
 - `backend/agent.py`
-- `backend/flow/*`
-
-这一层负责编排，不负责真正干活。
-
-当前主路由原则：
-
-- agent 先产出结构化 `intent packet`
-- `flow` 再结合 `policy` 和 `state` 决定动作顺序
-- 文件管理意图不应自由掉回 `rag.*`
-
-### 3. `policy`
+- `backend/flow/chat.py`
+- `backend/flow/upload.py`
+- `backend/flow/agent_core.py`
 
 职责：
 
-- 定义业务规则
+- 生成当前请求的执行上下文
+- 组织 memory、tool runtime、agent 循环
+- 处理短路分支、超时和停止原因
 
-例如：
+当前 hard-coded 规则主要只有几类：
 
-- 什么叫“重新生成”
-- 什么情况下必须确认
-- 什么情况下不能复用旧文档
-- 什么情况下要先澄清
+- 最近上传文件的 follow-up 确认
+- “重新生成一份文档”时不复用当前绑定文档
+- 智能表格已有行修改/删除直接判不支持
+
+更细的意图分流主要仍然依赖 `intent packet + prompt`。
+
+### `policy`
 
 当前对应：
 
-- `backend/policy/*`
-
-当前在路由上的位置是：
-
-- agent 主路由
-- `policy` 辅助校验和硬约束
-
-也就是：
-
-- `policy` 可以补强置信度
-- `policy` 可以拦截高风险动作
-- `policy` 可以要求确认
-- 但 `policy` 不应取代 agent 做主路由
-
-### 4. `state`
+- `backend/policy/document.py`
+- `backend/policy/upload.py`
+- `backend/policy/smartsheet.py`
+- `backend/policy/payloads.py`
 
 职责：
 
-- 提供当前会话事实
-- 维护持久状态
+- 定义少量确定性规则
+- 构造 flow 事件 payload
+- 做上传校验和智能表格限制
 
-例如：
+说明：
 
-- 当前绑定的 `doc_id` / `doc_url` / `doc_name`
-- 最近上传文件状态
-- request / flow event 的持久记录
+- `backend/policy/knowledge_base.py` 当前基本是占位文件
+- 知识库的主路由并不在 Python 里做关键词树，而是交给 LLM 分类
+
+### `state`
 
 当前对应：
 
 - `backend/memory.py`
-- `backend/state/*`
-
-### 5. `caps`
+- `backend/state/store.py`
 
 职责：
 
-- 定义对上层稳定可用的业务能力边界
+- 持久化会话状态
+- 维护当前绑定文档
+- 提供 recent chat history 和 memory context
+- 写 flow log
 
-例如：
-
-- 知识库入库
-- 知识库枚举
-- RAG 查询
-- 文档创建
-- 文档编辑
+### `caps`
 
 当前对应：
 
-- `backend/caps/*`
-
-注意：
-
-- `caps` 定义能力
-- 但对 agent 可见的统一接口仍然通过 MCP 暴露
-
-### 6. `runtime`
+- `backend/caps/documents.py`
+- `backend/caps/knowledge_base.py`
+- `backend/caps/rag.py`
 
 职责：
 
-- 连接 MCP
-- 暴露 MCP tools
-- 路由和转发调用
-- 统一参数和结果传递
+- 给上层提供薄封装
+- 把常用动作收敛成可复用接口
+
+当前特点：
+
+- `caps` 很薄，很多实际分发仍然落在 `runtime` 和 `tools`
+
+### `runtime`
 
 当前对应：
 
-- `backend/runtime/*`
-
-当前开始在这一层统一动作 dispatch：
-
+- `backend/runtime/host.py`
+- `backend/runtime/connection.py`
 - `backend/runtime/cli.py`
-
-所有 MCP 连接逻辑已统一到此目录。
-
-### 7. `tools`
+- `backend/runtime/local_tools.py`
+- `backend/runtime/mcp_logger.py`
 
 职责：
 
-- 真正执行能力
+- 连接外部 MCP server
+- 把远端工具暴露成 agent 可调用的工具名
+- 注册本地 KB/doc/RAG 工具
+- 记录 MCP 与 CLI 调用日志
 
-例如：
+当前实现里，agent 实际使用的是两类工具：
 
-- 本地 `llamaindex_rag`
-- 企微文档相关 tool 实现
-- 未来的知识库文件管理 tool 实现
+1. 外部 MCP 工具
+2. `backend/runtime/local_tools.py` 注册的本地工具
+
+### `tools`
 
 当前对应：
-
-- `backend/tools/*`
-
-当前开始在这一层收敛本地动作实现：
 
 - `backend/tools/kb_cli.py`
 - `backend/tools/doc_cli.py`
 - `backend/tools/rag_cli.py`
-
-`tools` 层里的 stdio wrapper 还必须满足一条额外约束：
-
-- 不能只做 import 转发
-- 必须在 `__main__` 中显式启动 `run(...)`
-
-### 8. `he`
+- `backend/tools/llamaindex_rag/*`
 
 职责：
 
-- 定义场景
-- 定义 gates
-- 收集运行证据
-- 输出报告
-- 做层级检查和回归判断
+- 真正执行本地动作
+- 封装 WeCom 文档 Markdown 读改写
+- 管理本地知识库 PDF
+- 提供本地 RAG 检索
 
-当前对应：
+## 文本消息主流程中的关键对象
 
-- `he/gates/*`
-- `he/scenarios/*`
-- `he/runs/*`
-- `he/reports/*`
-- `scripts/run_eval_case.py`
-- `scripts/check_layers.py`
+### `intent packet`
 
-## 仓库目录映射
+由 `backend/flow/agent_core.py` 里的 `classify_intent_packet` 生成。
 
-```text
-backend/
-  entry/
-  flow/
-  policy/
-  state/
-  caps/
-  runtime/
-  tools/
+当前允许的 family：
 
-he/
-  contracts/
-  flows/
-  gates/
-  scenarios/
-  runs/
-  reports/
-```
+- `knowledge_base`
+- `document`
+- `smartsheet`
+- `upload_followup`
+- `general`
 
-## 层级约束
+它不是最终执行结果，只是给 agent 提示“当前更像哪类请求”。
 
-### 1. `flow` 不能直接依赖 `tools`
+### `memory_context`
 
-`flow` 必须通过：
+由 `backend/state/store.py` 动态拼出，当前可能包含：
 
-- `caps`
-- `runtime`
+- 当前绑定文档
+- 最近若干轮用户请求及对应 tool 摘要
+- 最近上传的 PDF
 
-去使用底层能力，不能直接 import `tools`。
+### `chat_history`
 
-### 2. `tools` 不能反向依赖 `flow`
+同样来自 `backend/state/store.py`，会按 `user -> assistant(tool_calls) -> tool -> assistant` 的格式重建最近若干轮消息，供 LLM 延续上下文。
 
-下层不能反向依赖上层。  
-尤其 `tools` 不能 import `backend/agent.py` 或 `backend/flow/*` 来决定流程。
+## 文档连续性
 
-### 3. 生产代码不能依赖 `he`
+文档连续性当前依赖 `session_docs` 表里的这些字段：
 
-生产代码不能 import：
+- `doc_id`
+- `doc_url`
+- `doc_name`
+- `last_tool_name`
+- `last_user_text`
 
-- `he/*`
+一旦 tool 结果里能解析出有效 `doc_id`，系统就会更新绑定文档。  
+后续如果命中“继续编辑上一个文档”的语义，默认会把这份绑定文档注入 memory。
 
-`he` 是外部验证层，不是生产运行依赖。
+## 上传连续性
 
-### 4. `policy` 和 `state` 不决定完整流程
+上传连续性依赖 `session_uploaded_files` 表里的这些字段：
 
-它们可以提供：
+- `file_name`
+- `stored_path`
+- `file_sha256`
+- `upload_action`
+- `matched_file_name`
+- `matched_stored_path`
 
-- 规则
-- 会话事实
+当前 upload action 可能是：
 
-但完整流程仍由 `flow` 决定。
+- `added`
+- `replaced`
+- `unchanged`
+- `duplicate_content`
 
-### 5. hook 属于可观测性输出，不替代流程决策
+## 日志与运行产物
 
-hook 负责：
-
-- 记录 route
-- 记录 state
-- 记录 tool 调用
-- 记录输出
-
-hook 不负责：
-
-- 取代 `flow`
-- 取代 `policy`
-- 取代 evaluator
-
-## HE 为什么需要分层
-
-HE 不是只看最终回复。  
-HE 还要看层与层之间有没有断链。
-
-例如：
-
-- `entry -> flow`
-  - 有没有分流正确
-- `flow -> policy/state`
-  - 有没有读对规则和会话事实
-- `flow -> runtime`
-  - 有没有选对能力和 tool
-- `runtime -> tools`
-  - 有没有正确转发到实现层
-- `runtime -> tools`
-  - required stdio MCP server 能不能先完成 initialize
-
-所以分层不是为了抽象本身，而是为了让错误能被定位和验证。
-
-## 运行产物位置
-
-运行时产物统一收在 `data/` 下：
+当前主要运行产物在 `data/` 下：
 
 - `data/memory.sqlite3`
-- `data/index/manifest.json`
-- `data/index/persist/*`
 - `data/logs/flow/flow_runtime.log`
 - `data/logs/cli/cli_runtime.log`
-- `data/logs/mcp/mcp_client.log`
+- `data/logs/cli/rag_runtime.log`
+- `data/logs/mcp/*`（stdio MCP 失败时最重要）
 
-`manifest/`、`persist/`、`logs/` 不再作为根目录一级目录参与结构表达。
+## 依赖方向
 
-`he/runs/` 和 `he/reports/` 也属于可清理的运行产物，不属于稳定代码结构。
+当前仓库仍按这条方向理解：
 
-## 智能表格意图
+- `entry -> flow`
+- `flow -> policy/state/runtime/caps`
+- `runtime -> tools`
 
-智能表格不是普通 `document` 或 `knowledge_base` 的别名。
+`scripts/check_layers.py` 会检查两类约束：
 
-当前架构里应把它视为独立动作家族：
+- 下层不能反向依赖上层
+- `flow` 不能直接 import `tools`
 
-- `intent_family = smartsheet`
-- `intent = smartsheet.create | smartsheet.update_schema | smartsheet.add_records`
+## 当前应如何理解智能表格
 
-对应关系：
+智能表格仍然是独立意图家族，不等同于普通文档。
 
-- `flow`
-  - 负责把智能表格请求排成：识别意图 -> 权限检查 -> 建表 -> 初始化字段/记录
-- `policy`
-  - 负责限制这类请求不能退化成知识库列表或 `rag.*`
-- `caps`
-  - 定义 `smartsheet.*` 动作
-- `runtime`
-  - 把 `smartsheet.*` 分发到企业微信文档 MCP
-- `tools`
-  - 真正执行 `create_doc(doc_type=10)`、`smartsheet_add_sheet`、`smartsheet_add_fields`、`smartsheet_add_records`
+当前代码里实际存在的约束是：
+
+- 能识别 `smartsheet` family
+- 能把智能表格 URL 绑定进 `session_docs`
+- 如果用户要求修改或删除已有行，直接回复不支持
+- 其它智能表格动作是否能成功，取决于外部 MCP server 是否真正提供对应工具
