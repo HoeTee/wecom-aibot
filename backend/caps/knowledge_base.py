@@ -11,13 +11,8 @@ def sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _scope_from_source_type(source_type: str | None) -> str:
-    _ = source_type
-    return "all"
-
-
-def list_kb_files(*, source_type: str | None = None) -> dict[str, Any]:
-    return dispatch_cli_action("kb.list", scope=_scope_from_source_type(source_type))
+def list_kb_files() -> dict[str, Any]:
+    return dispatch_cli_action("kb.list")
 
 
 def list_uploaded_kb_files(*, limit: int = 5) -> dict[str, Any]:
@@ -28,13 +23,11 @@ def match_related_kb_files(
     query: str,
     *,
     limit: int = 10,
-    source_type: str | None = None,
 ) -> dict[str, Any]:
     return dispatch_cli_action(
         "kb.match_related",
         query=query,
         limit=limit,
-        scope=_scope_from_source_type(source_type),
     )
 
 
@@ -54,16 +47,16 @@ def store_uploaded_kb_file(file_bytes: bytes, original_name: str) -> dict[str, A
     return dispatch_cli_action("kb.store_upload", file_bytes=file_bytes, original_name=original_name)
 
 
-def list_pdf_records(source_type: str | None = None) -> list[dict[str, Any]]:
-    return list_kb_files(source_type=source_type)["records"]
+def list_pdf_records() -> list[dict[str, Any]]:
+    return list_kb_files()["records"]
 
 
 def recent_uploaded_records(limit: int = 5) -> list[dict[str, Any]]:
     return list_uploaded_kb_files(limit=limit)["records"]
 
 
-def match_pdf_records(query: str, *, limit: int = 10, source_type: str | None = None) -> list[dict[str, Any]]:
-    return match_related_kb_files(query, limit=limit, source_type=source_type)["records"]
+def match_pdf_records(query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    return match_related_kb_files(query, limit=limit)["records"]
 
 
 def resolve_record_by_index(candidates: list[dict[str, Any]], index: int) -> dict[str, Any] | None:
@@ -72,11 +65,11 @@ def resolve_record_by_index(candidates: list[dict[str, Any]], index: int) -> dic
     return candidates[index]
 
 
-def find_record_by_file_name(file_name: str, *, source_type: str | None = None) -> dict[str, Any] | None:
+def find_record_by_file_name(file_name: str) -> dict[str, Any] | None:
     normalized = str(file_name or "").strip().lower()
     if not normalized:
         return None
-    for record in list_pdf_records(source_type=source_type):
+    for record in list_pdf_records():
         if str(record["file_name"]).strip().lower() == normalized:
             return record
     return None

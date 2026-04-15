@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from backend.agent import Agent, Settings
+from backend.agent import Agent, Settings, classify_intent_packet
 from backend.caps.documents import load_system_prompt
 from backend.policy.payloads import (
     build_doc_binding_updated_payload,
@@ -16,6 +16,7 @@ from backend.policy.payloads import (
     build_stop_reason_payload,
 )
 from backend.policy.document import is_fresh_document_request
+from backend.policy.smartsheet import is_row_modification_request, build_unsupported_row_modify_reply
 from backend.runtime import MCPHost, load_mcp_server_configs_from_env
 from backend.runtime.local_tools import get_local_agent_tools
 from backend.state.store import (
@@ -24,6 +25,7 @@ from backend.state.store import (
     generate_request_id,
     latest_uploaded_file,
     load_memory_context,
+    load_recent_chat_history,
     persist_doc_binding_from_tool_result,
     save_flow_event,
     save_tool_call,
@@ -166,6 +168,27 @@ def _summarize_args(args_dict: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _build_short_message_routing_context(session_id: str, content: str) -> str:
+    """For very short messages (confirmations like '对', '好', '导出'), include the
+    last assistant reply so the intent classifier can resolve what's being confirmed."""
+    if len(content) > 10:
+        return ""
+    try:
+        from backend.state.store import _connect
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT content FROM conversation_turns "
+                "WHERE session_id = ? AND role = 'assistant' "
+                "ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if row:
+                return f"Last assistant reply: {str(row['content'])[:300]}"
+    except Exception:
+        pass
+    return ""
+
+
 async def run_chat(payload: dict[str, Any]) -> ChatResult:
     mcp_runtime: MCPHost | None = None
     content = str(payload.get("content", "")).strip()
@@ -241,12 +264,34 @@ async def run_chat(payload: dict[str, Any]) -> ChatResult:
                 modified_bound_doc_url = str(binding.get("doc_url") or "").strip() or modified_bound_doc_url
 
         save_user_turn_once(content)
+
+        routing_context = _build_short_message_routing_context(session_id, content)
+        intent_packet = await classify_intent_packet(
+            content,
+            memory_context=memory_context,
+            routing_context=routing_context,
+        )
+
+        if (
+            intent_packet.get("intent_family") == "smartsheet"
+            and is_row_modification_request(user_text)
+        ):
+            reply = build_unsupported_row_modify_reply()
+            save_turn(session_id, "assistant", reply, request_id=request_id)
+            emit_flow("flow", "intent_packet_created", intent_packet)
+            emit_flow("entry", "reply_generated", build_reply_generated_payload("unsupported_operation", reply))
+            emit_flow("flow", "stop_reason", build_stop_reason_payload("unsupported_operation", "row_modification_not_available"))
+            return {"reply": reply, "requestId": request_id}
+
+        chat_history = load_recent_chat_history(session_id, limit=10)
         agent = Agent(
             name="WeComBackendAgent",
             system_prompt=load_system_prompt(),
             mcp_client=runtime,
             tools=tools,
             memory_context=memory_context,
+            chat_history=chat_history,
+            intent_packet=intent_packet,
             on_tool_result=on_tool_result,
             on_flow_event=lambda event_name, event_payload: emit_flow("flow", event_name, event_payload),
         )

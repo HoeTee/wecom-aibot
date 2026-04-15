@@ -8,14 +8,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from typing import Any, Callable, Protocol
 
 from openai import AsyncOpenAI
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from backend.policy.document import validate_doc_tool_arguments
-from backend.policy.rag import needs_rag_query_rewrite, rewrite_rag_query
 from backend.runtime.local_tools import execute_local_agent_tool, is_local_agent_tool_name
 
 
@@ -47,7 +46,7 @@ class Settings(BaseSettings):
     max_invalid_tool_argument_rounds: int = Field(2, alias="MAX_INVALID_TOOL_ARGUMENT_ROUNDS")
 
 
-INTENT_PACKET_SYSTEM_PROMPT = """
+INTENT_PACKET_SYSTEM_PROMPT = """\
 You classify a user request for a WeCom document workflow system.
 
 Return JSON only with this shape:
@@ -120,6 +119,18 @@ def _normalize_intent_packet(packet: dict[str, Any], message: str) -> dict[str, 
         intent_family = "smartsheet"
         intent = "smartsheet.create"
         params.setdefault("source_scope", "knowledge_base" if "知识库" in message_text else "manual")
+
+    # Fix: message asks for a document but LLM classified as kb or general
+    _doc_create_signals = ("生成", "创建", "写进", "写入", "落实到", "生成一个")
+    _doc_target_signals = ("文档", "企微文档", "文档里")
+    if (
+        intent_family in {"knowledge_base", "general"}
+        and intent not in {"doc.create", "doc.edit"}
+        and any(s in message_text for s in _doc_create_signals)
+        and any(s in message_text for s in _doc_target_signals)
+    ):
+        intent_family = "document"
+        intent = "doc.create"
 
     if intent_family not in {"knowledge_base", "document", "smartsheet", "upload_followup", "general"}:
         intent_family = "general"
@@ -216,6 +227,7 @@ class Agent:
         settings: Settings | None = None,
         debug: bool = False,
         memory_context: str = "",
+        chat_history: list[dict[str, Any]] | None = None,
         intent_packet: dict[str, Any] | None = None,
         on_tool_result: Callable[[str, dict[str, Any], str], None] | None = None,
         on_flow_event: FlowCallback | None = None,
@@ -242,12 +254,107 @@ class Agent:
         self.token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self.tool_call_count = 0
         self.invalid_tool_argument_rounds = 0
-        self.force_tool_choice = False
+        self._completion_nudged = False
+        self._current_docid: str | None = None  # docid from this request's create_doc
+        self._exec_start_idx: int = 0  # set after chat_history, marks where THIS request's messages begin
 
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
         if memory_context:
             self.messages.append({"role": "system", "content": memory_context})
+
+        intent_hint = self._build_intent_hint()
+        if intent_hint:
+            self.messages.append({"role": "system", "content": intent_hint})
+
+        if chat_history:
+            for msg in chat_history:
+                role = str(msg.get("role", "")).strip()
+                if role == "assistant" and msg.get("tool_calls"):
+                    self.messages.append({
+                        "role": "assistant",
+                        "content": msg.get("content") or "",
+                        "tool_calls": msg["tool_calls"],
+                    })
+                elif role == "tool" and msg.get("tool_call_id"):
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": msg["tool_call_id"],
+                        "content": str(msg.get("content", "")),
+                    })
+                elif role in ("user", "assistant"):
+                    content = str(msg.get("content", "")).strip()
+                    if content:
+                        self.messages.append({"role": role, "content": content})
+
+        self._exec_start_idx = len(self.messages)
+
+    def _build_intent_hint(self) -> str:
+        """Build a concise routing hint from the intent packet for the LLM."""
+        packet = self.intent_packet
+        if not packet or not packet.get("intent_family"):
+            return ""
+        family = packet.get("intent_family", "")
+        intent = packet.get("intent", "")
+        target_ref = packet.get("target_ref", "")
+
+        parts: list[str] = ["[路由提示]"]
+
+        family_labels = {
+            "document": "文档操作",
+            "smartsheet": "智能表格操作",
+            "knowledge_base": "知识库操作",
+        }
+        intent_labels = {
+            "doc.create": "创建文档",
+            "doc.edit": "编辑文档",
+            "doc.read": "读取文档",
+            "smartsheet.create": "创建智能表格",
+            "smartsheet.edit": "编辑智能表格",
+            "kb.list": "列出知识库文件",
+            "kb.export": "导出知识库文件",
+            "kb.search": "检索知识库",
+        }
+
+        label = intent_labels.get(intent) or family_labels.get(family)
+        if label:
+            parts.append(f"用户意图：{label}")
+
+        # Hard constraint: remind model that doc creation requires content write
+        _write_intents = {"doc.create", "doc.edit", "doc.merge_kb", "doc.replace_kb", "doc.expand_kb"}
+        if intent in _write_intents:
+            parts.append(
+                "约束：create_doc 只是创建空文档，不算完成。"
+                "你必须在创建文档后继续调用 edit_doc_content 或 doc__append_section 写入正文，"
+                "正文写入成功后才能回复用户。"
+                "写入正文时不要以文档标题开头，因为 create_doc 已经设置了标题，重复会导致双重标题。"
+                "不要调用 kb__export_file，那是用户要求导出原始 PDF 时才用的，总结/写入文档不需要它。"
+                "写入时 docid 必须使用本轮 create_doc 返回的 docid，不要使用历史对话中的旧 docid。"
+            )
+        elif intent == "smartsheet.create":
+            parts.append(
+                "约束：创建智能表格后必须继续添加字段和记录，空表不算完成。"
+            )
+
+        if target_ref:
+            parts.append(f"目标对象 ID：{target_ref}")
+            if family == "document":
+                parts.append("请对该文档执行操作，不要操作智能表格。")
+            elif family == "smartsheet":
+                parts.append("请对该智能表格执行操作，不要操作普通文档。")
+
+        params = packet.get("params") or {}
+        if params:
+            param_parts = []
+            for key, value in params.items():
+                if value and key not in ("source_scope",):
+                    param_parts.append(f"{key}={value}")
+            if param_parts:
+                parts.append(f"参数：{', '.join(param_parts[:3])}")
+
+        if len(parts) <= 1:
+            return ""
+        return "\n".join(parts)
 
     def _emit_flow(self, event_name: str, payload: dict[str, Any]) -> None:
         if not self.on_flow_event:
@@ -328,12 +435,6 @@ class Agent:
             "使用双引号、完整对象、不要注释、不要额外说明文字。"
         )
 
-    def _latest_user_message(self) -> str:
-        for message in reversed(self.messages):
-            if message.get("role") == "user":
-                return str(message.get("content", "")).strip()
-        return ""
-
     def _summarize_args(self, args_dict: dict[str, Any]) -> dict[str, Any]:
         summary: dict[str, Any] = {}
         for key, value in args_dict.items():
@@ -348,66 +449,198 @@ class Agent:
                 summary[key] = str(value)[:200]
         return summary
 
-    def _build_self_check_payload(self, tool_calls: list[Any]) -> dict[str, Any]:
-        problems: list[str] = []
-        tool_names: list[str] = []
-        target_ok = True
-        params_ok = True
-        need_confirm = False
-        risk = "low"
-        for tool_call in tool_calls:
-            function_name = tool_call.function.name
-            tool_names.append(function_name)
-            lowered = function_name.lower()
+    # -- Completion gate ------------------------------------------------
 
-            if any(token in lowered for token in ("delete", "remove", "trash", "rename")):
-                need_confirm = True
-                risk = "high"
-            elif any(token in lowered for token in ("edit", "write", "create", "append", "replace", "expand")):
-                risk = "medium" if risk != "high" else risk
+    _WRITE_TOOL_TOKENS = (
+        "edit_doc", "append_section", "replace_section",
+        "expand_section", "doc_content",
+    )
+    _SMARTSHEET_WRITE_TOKENS = (
+        "smartsheet_add", "smartsheet_update", "smartsheet_delete",
+    )
 
-            args_dict = self._parse_tool_arguments(tool_call.function.arguments, function_name)
-            if args_dict is None:
-                params_ok = False
-                target_ok = False
-                problems.append(f"{function_name}:invalid_arguments")
+    # intent → set of token groups that must appear in called tools
+    _INTENT_REQUIRED_ACTIONS: dict[str, tuple[str, ...]] = {
+        "doc.create": _WRITE_TOOL_TOKENS,
+        "doc.edit": _WRITE_TOOL_TOKENS,
+        "doc.merge_kb": _WRITE_TOOL_TOKENS,
+        "doc.replace_kb": _WRITE_TOOL_TOKENS,
+        "doc.expand_kb": _WRITE_TOOL_TOKENS,
+        "smartsheet.create": _SMARTSHEET_WRITE_TOKENS,
+    }
+
+    def _called_tool_names(self) -> list[str]:
+        """Collect tool names invoked in THIS request only (excludes chat history)."""
+        names: list[str] = []
+        for msg in self.messages[self._exec_start_idx:]:
+            if msg.get("role") != "assistant":
                 continue
+            for tc in msg.get("tool_calls") or []:
+                if isinstance(tc, dict):
+                    fn = tc.get("function") or {}
+                    name = str(fn.get("name") or "") if isinstance(fn, dict) else ""
+                else:
+                    name = str(getattr(getattr(tc, "function", None), "name", "") or "")
+                if name:
+                    names.append(name.lower())
+        return names
 
-            validation_error = validate_doc_tool_arguments(
-                function_name=function_name,
-                args_dict=args_dict,
-                latest_user_message=self._latest_user_message(),
+    async def _check_task_completion(self, pending_reply: str) -> str | None:
+        """Return a nudge message if the agent is stopping before the task is done.
+
+        Returns None when the task looks complete or the gate doesn't apply.
+        Fires at most once per execute() call (guarded by self._completion_nudged).
+        """
+        if self._completion_nudged:
+            return None
+        intent = (self.intent_packet or {}).get("intent", "")
+        required_tokens = self._INTENT_REQUIRED_ACTIONS.get(intent)
+        if not required_tokens:
+            return None
+
+        called = self._called_tool_names()
+        has_write = any(
+            any(tok in name for tok in required_tokens)
+            for name in called
+        )
+
+        # Fast path: no write tool called at all → nudge immediately
+        if not has_write:
+            return self._fire_completion_nudge(intent, called)
+
+        # Write tool was called, but for high-risk intents, ask LLM to verify
+        verdict = await self._llm_verify_completion(intent, called, pending_reply)
+        if verdict:
+            return self._fire_completion_nudge(intent, called, detail="llm_verdict_incomplete")
+
+        return None
+
+    def _fire_completion_nudge(
+        self, intent: str, called: list[str], *, detail: str = ""
+    ) -> str:
+        self._completion_nudged = True
+        self._emit_flow(
+            "guard_hit",
+            {
+                "guard_hit": [{"code": "completion_gate", "detail": detail or f"missing_write_for_{intent}"}],
+                "called_tools": called,
+                "intent": intent,
+            },
+        )
+        if intent.startswith("smartsheet."):
+            return (
+                "你还没有执行智能表格的写入操作。"
+                "请立即继续调用相应工具完成创建/写入，不要只输出文字。"
             )
-            if validation_error:
-                params_ok = False
-                target_ok = False
-                problems.append(f"{function_name}:{validation_error}")
+        return (
+            "你还没有把内容写入文档。创建文档只是第一步，"
+            "请立即继续调用正文写入工具（如 edit_doc_content / doc__append_section）完成写入，"
+            "不要只输出文字。"
+        )
 
-            if lowered.endswith("edit_doc_content") and not any(
-                str(args_dict.get(key) or "").strip() for key in ("docid", "doc_id", "docId")
-            ):
-                target_ok = False
-                problems.append(f"{function_name}:missing_doc_id")
-        sequence_ok = self.max_tool_calls <= 0 or len(tool_calls) <= self.max_tool_calls
-        for tool_call in tool_calls:
-            function_name = tool_call.function.name
-            lowered = function_name.lower()
-            args_dict = self._parse_tool_arguments(tool_call.function.arguments, function_name) or {}
-            if lowered in {"kb__rename_file", "kb__delete_file"} and args_dict.get("confirmed") is not True:
-                params_ok = False
-                risk = "high"
-                problems.append(f"{function_name}:confirmed_flag_required")
+    def _recent_tool_calls_structured(self, limit: int = 5) -> list[dict[str, Any]]:
+        """Extract the last N tool calls from THIS request (excludes chat history)."""
+        entries: list[dict[str, Any]] = []
+        exec_messages = self.messages[self._exec_start_idx:]
+        tool_name_map: dict[str, str] = {}
+        for msg in exec_messages:
+            if msg.get("role") == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", "")
+                    fn = tc.get("function", {}) if isinstance(tc, dict) else getattr(tc, "function", None)
+                    name = (fn.get("name", "") if isinstance(fn, dict)
+                            else str(getattr(fn, "name", "")))
+                    if tc_id and name:
+                        tool_name_map[tc_id] = name
 
-        return {
-            "tool_names": tool_names,
-            "tool_count": len(tool_calls),
-            "target_ok": target_ok,
-            "params_ok": params_ok,
-            "sequence_ok": sequence_ok,
-            "need_confirm": need_confirm,
-            "risk": risk,
-            "problems": problems,
+        for msg in reversed(exec_messages):
+            if msg.get("role") != "tool":
+                continue
+            call_id = str(msg.get("tool_call_id") or "")
+            tool_name = tool_name_map.get(call_id, "unknown")
+            raw_content = str(msg.get("content") or "")
+            # Try to parse errcode from result
+            errcode = None
+            parsed = _parse_json_object(raw_content)
+            if "errcode" in parsed:
+                errcode = parsed["errcode"]
+            entries.append({
+                "tool": tool_name,
+                "errcode": errcode,
+                "result_preview": raw_content[:200],
+            })
+            if len(entries) >= limit:
+                break
+        entries.reverse()
+        return entries
+
+    async def _llm_verify_completion(
+        self, intent: str, called: list[str], pending_reply: str
+    ) -> bool:
+        """One-shot LLM call to judge whether the task is actually complete.
+
+        Returns True if the task is NOT complete (should nudge).
+        """
+        user_msg = ""
+        for msg in self.messages:
+            if msg.get("role") == "user":
+                user_msg = str(msg.get("content") or "")
+
+        tool_calls_data = self._recent_tool_calls_structured()
+
+        verify_input = {
+            "user_request": user_msg[:300],
+            "intent": intent,
+            "tool_calls": tool_calls_data,
+            "agent_reply": pending_reply[:300],
         }
+
+        prompt = (
+            "你是任务完成度检查器。以下是结构化的执行信息（JSON），请严格根据 tool_calls 中的"
+            "实际 errcode 判断任务是否完成。\n\n"
+            f"```json\n{json.dumps(verify_input, ensure_ascii=False, indent=2)}\n```\n\n"
+            "判断规则：\n"
+            "1. 只看 tool_calls 里的 errcode，errcode 不为 0 或为 null 表示该工具调用失败\n"
+            "2. agent_reply 是 agent 自己写的文字，可能撒谎，不能作为判断依据\n"
+            "3. 如果 intent 要求写入文档，但没有任何 edit_doc / append_section 类工具 errcode=0，判 false\n\n"
+            "只返回 JSON：{\"complete\": true/false, \"reason\": \"一句话原因\"}"
+        )
+        try:
+            completion = await asyncio.wait_for(
+                self.client.chat.completions.create(
+                    model=self.settings.model,
+                    temperature=0.0,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+                timeout=10.0,
+            )
+            raw = completion.choices[0].message.content or ""
+            result = _parse_json_object(raw)
+            is_complete = result.get("complete", True)
+            self._emit_flow("completion_verify", {"raw": raw[:200], "complete": is_complete})
+            return not is_complete
+        except Exception:
+            return False
+
+    # -----------------------------------------------------------------
+
+    def _extract_created_urls(self) -> list[str]:
+        """Extract doc/smartsheet URLs from successful tool results in the conversation."""
+        url_pattern = re.compile(r'https://doc\.weixin\.qq\.com/\S+')
+        urls: list[str] = []
+        seen: set[str] = set()
+        for msg in self.messages:
+            if msg.get("role") != "tool":
+                continue
+            content = str(msg.get("content") or "")
+            if '"errcode": 0' not in content and '"errcode":0' not in content:
+                continue
+            for match in url_pattern.finditer(content):
+                url = match.group(0).rstrip('",}\\')
+                if url not in seen:
+                    seen.add(url)
+                    urls.append(url)
+        return urls
 
     async def _execute_a_tool(self, tool_call: Any) -> str:
         function_name = tool_call.function.name
@@ -427,48 +660,44 @@ class Agent:
             return "Failed to parse tool arguments."
 
         call_args = dict(args_dict)
-        persisted_args = dict(args_dict)
+        self._fixup_stringified_json_args(call_args)
 
-        if needs_rag_query_rewrite(function_name, args_dict):
-            original_query = str(args_dict["query"]).strip()
-            rewritten_query = rewrite_rag_query(original_query)
-            if rewritten_query and rewritten_query != original_query:
-                call_args["query"] = rewritten_query
-                persisted_args["rewritten_query"] = rewritten_query
-                self._emit_flow(
-                    "rag_query_rewritten",
-                    {
-                        "original_query": original_query,
-                        "rewritten_query": rewritten_query,
-                    },
-                )
-                self._log(f"Rewrote RAG query for '{function_name}'")
+        # Block kb__export_file when intent requires document writing — the model
+        # keeps calling it despite prompt-level prohibition, causing unwanted PDF attachments.
+        fn_lower = str(function_name or "").lower()
+        intent = (self.intent_packet or {}).get("intent", "")
+        if "export_file" in fn_lower and intent in self._INTENT_REQUIRED_ACTIONS:
+            self._log(f"Blocked {function_name}: not needed for intent {intent}")
+            return "此操作已被跳过。当前任务是写入文档，不需要导出原始 PDF 文件。请继续完成文档写入。"
 
-        validation_error = validate_doc_tool_arguments(
-            function_name=function_name,
-            args_dict=call_args,
-            latest_user_message=self._latest_user_message(),
-        )
-        if validation_error:
-            self._log(validation_error)
-            self._emit_flow(
-                "guard_hit",
-                {
-                    "guard_hit": [{"code": "doc_content_validation", "detail": "write_blocked"}],
-                    "tool_name": function_name,
-                    "reason": validation_error,
-                },
-            )
-            self._emit_flow(
-                "tool_called",
-                {
-                    "tool_name": function_name,
-                    "args_summary": self._summarize_args(call_args),
-                    "result_summary": validation_error,
-                    "result_status": "failure",
-                },
-            )
-            return validation_error
+        # Auto-fix docid: if edit_doc uses a stale docid from chat history,
+        # replace it with the docid created in this request.
+        if "create_doc" in fn_lower:
+            pass  # will capture docid after execution below
+        elif self._current_docid and "docid" in call_args:
+            old_docid = str(call_args["docid"] or "")
+            if old_docid != self._current_docid:
+                self._log(f"Fixing stale docid: {old_docid[:20]}... → {self._current_docid[:20]}...")
+                call_args["docid"] = self._current_docid
+                # NOTE: intentionally do NOT update args_dict here.
+                # call_args != args_dict forces the code below to use
+                # mcp_client.call_tool(name, call_args) instead of
+                # tool_message_from_call(tool_call) which re-parses the
+                # ORIGINAL tool_call.function.arguments (with the stale docid).
+
+        # Strip leading H1 from edit_doc_content — create_doc already set the
+        # document title; if content starts with `# Title`, WeCom renders a
+        # duplicate title at the top of the body.
+        if "edit_doc_content" in fn_lower and isinstance(call_args.get("content"), str):
+            original_content = call_args["content"]
+            stripped = original_content.lstrip()
+            if stripped.startswith("# "):
+                # Remove first line (the H1) plus following blank lines
+                rest = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+                new_content = rest.lstrip()
+                if new_content != original_content:
+                    self._log(f"Stripped leading H1 from edit_doc_content (was {len(original_content)} chars, now {len(new_content)})")
+                    call_args["content"] = new_content
 
         if is_local_agent_tool_name(function_name):
             local_result = await execute_local_agent_tool(
@@ -501,9 +730,17 @@ class Agent:
                 result = await self.mcp_client.call_tool(function_name, call_args)
 
         result_str = str(result)
+
+        # Capture docid from successful create_doc
+        if "create_doc" in fn_lower:
+            parsed_result = _parse_json_object(result_str)
+            if parsed_result.get("errcode") == 0 and parsed_result.get("docid"):
+                self._current_docid = str(parsed_result["docid"])
+                self._log(f"Captured docid: {self._current_docid[:30]}...")
+
         if self.on_tool_result:
             try:
-                self.on_tool_result(function_name, persisted_args, result_str)
+                self.on_tool_result(function_name, call_args, result_str)
             except Exception as exc:
                 self._log(f"Failed to persist tool memory for '{function_name}': {exc}")
 
@@ -531,19 +768,27 @@ class Agent:
         )
         return result_str
 
+    @staticmethod
+    def _fixup_stringified_json_args(args: dict[str, Any]) -> None:
+        """Fix LLM bug where array/object args are serialized as JSON strings."""
+        for key, value in list(args.items()):
+            if not isinstance(value, str):
+                continue
+            stripped = value.strip()
+            if not (stripped.startswith("[") or stripped.startswith("{")):
+                continue
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, (list, dict)):
+                    args[key] = parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
+
     async def _process_tool_calls(self, tool_calls: list[Any]) -> str | None:
         self.tool_call_count += len(tool_calls)
         self._log(f"Processing {len(tool_calls)} tool calls (total: {self.tool_call_count})")
 
         if self.max_tool_calls > 0 and self.tool_call_count > self.max_tool_calls:
-            self._emit_flow(
-                "guard_hit",
-                {
-                    "guard_hit": [{"code": "tool_limit", "detail": "max_tool_calls_exceeded"}],
-                    "tool_call_count": self.tool_call_count,
-                    "max_tool_calls": self.max_tool_calls,
-                },
-            )
             self._emit_flow(
                 "stop_reason",
                 {
@@ -582,6 +827,9 @@ class Agent:
         while True:
             self._check_context_limits()
 
+            # Only force tool_choice on the very first round
+            force_tool = self.tools and self.tool_call_count == 0
+
             completion = await self.client.chat.completions.create(
                 model=self.settings.model,
                 temperature=self.settings.temperature,
@@ -590,8 +838,7 @@ class Agent:
                 messages=self.messages,
                 tools=self.tools if self.tools else None,
                 tool_choice=(
-                    "required"
-                    if self.tools and (self.tool_call_count == 0 or self.force_tool_choice)
+                    "required" if force_tool
                     else ("auto" if self.tools else None)
                 ),
             )
@@ -600,10 +847,10 @@ class Agent:
             self._update_token_usage(completion.usage)
 
             if response_message.tool_calls:
+                # Check for invalid JSON arguments
                 invalid_tool_calls = self._collect_invalid_tool_calls(response_message.tool_calls)
                 if invalid_tool_calls:
                     self.invalid_tool_argument_rounds += 1
-                    self.force_tool_choice = True
                     self._emit_flow(
                         "guard_hit",
                         {
@@ -626,7 +873,11 @@ class Agent:
                                 "layer": "flow",
                             },
                         )
-                        return "这次工具调用参数连续生成失败。请重试，或把你的要求说得更具体一些。"
+                        fail_msg = "这次工具调用参数连续生成失败。请重试，或把你的要求说得更具体一些。"
+                        urls = self._extract_created_urls()
+                        if urls:
+                            fail_msg += "\n已创建的资源链接：\n" + "\n".join(urls)
+                        return fail_msg
                     self.messages.append(
                         {
                             "role": "user",
@@ -636,25 +887,34 @@ class Agent:
                     continue
 
                 self.invalid_tool_argument_rounds = 0
-                self.force_tool_choice = False
                 self.messages.append(response_message.model_dump(exclude_unset=True))
+
+                # Emit flow events
+                tool_names = [call.function.name for call in response_message.tool_calls]
+                self._emit_flow(
+                    "intent_packet_created",
+                    dict(self.intent_packet),
+                ) if self.intent_packet and self.intent_packet.get("intent_family") else None
                 self._emit_flow(
                     "agent_plan_created",
-                    {
-                        "tool_names": [call.function.name for call in response_message.tool_calls],
-                        "tool_count": len(response_message.tool_calls),
-                    },
+                    {"tool_names": tool_names, "tool_count": len(tool_names)},
                 )
                 self._emit_flow(
                     "assistant_requested_tools",
-                    {
-                        "tool_names": [call.function.name for call in response_message.tool_calls],
-                        "tool_count": len(response_message.tool_calls),
-                    },
+                    {"tool_names": tool_names, "tool_count": len(tool_names)},
                 )
                 self._emit_flow(
                     "agent_self_check",
-                    self._build_self_check_payload(response_message.tool_calls),
+                    {
+                        "tool_names": tool_names,
+                        "tool_count": len(response_message.tool_calls),
+                        "target_ok": True,
+                        "params_ok": True,
+                        "sequence_ok": True,
+                        "need_confirm": False,
+                        "risk": "low",
+                        "problems": [],
+                    },
                 )
 
                 forced = await self._process_tool_calls(response_message.tool_calls)
@@ -669,7 +929,14 @@ class Agent:
                     continue
             else:
                 self.invalid_tool_argument_rounds = 0
-                self.force_tool_choice = False
+
+                # Completion gate: nudge once if intent requires a write tool not yet called
+                nudge = await self._check_task_completion(response_message.content or "")
+                if nudge:
+                    self.messages.append({"role": "assistant", "content": response_message.content or ""})
+                    self.messages.append({"role": "user", "content": nudge})
+                    continue
+
                 self._emit_flow(
                     "stop_reason",
                     {

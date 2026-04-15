@@ -16,6 +16,7 @@ from backend.runtime.local_tools import (
 )
 from backend.tools.llamaindex_rag.runtime import (
     LOCAL_RAG_SEARCH_TOOL_NAME,
+    LOCAL_RAG_SUMMARIZE_TOOL_NAME,
     get_local_rag_tools,
 )
 
@@ -30,9 +31,8 @@ class LocalAgentToolsTests(unittest.TestCase):
         self.assertIn(DOC_APPEND_SECTION_TOOL_NAME, tool_names)
         self.assertIn(LOCAL_RAG_SEARCH_TOOL_NAME, tool_names)
         self.assertNotIn("kb__list_recent_uploads", tool_names)
-        self.assertNotIn("llamaindex_rag__llamaindex_rag_summarize", tool_names)
 
-    def test_local_rag_tools_only_expose_search(self) -> None:
+    def test_local_rag_tools_expose_search_only(self) -> None:
         tool_names = {tool["function"]["name"] for tool in get_local_rag_tools()}
         self.assertEqual(tool_names, {LOCAL_RAG_SEARCH_TOOL_NAME})
 

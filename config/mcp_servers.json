@@ -1,18 +1,6 @@
 {
   "servers": [
     {
-      "name": "llamaindex_rag", 
-      "tool_prefix": "llamaindex_rag", 
-      "transport": "stdio", 
-      "command": ".venv\\Scripts\\python.exe", 
-      "args": [
-        "-m", 
-        "backend.mcp_server_local.llamaindex_rag.mcp_llamaindex_rag"
-      ], 
-      "cwd": ".", 
-      "required": true
-    },
-    {
       "name": "wecom-docs", 
       "tool_prefix": "wecom-docs", 
       "transport": "streamable_http",

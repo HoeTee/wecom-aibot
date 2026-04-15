@@ -7,6 +7,7 @@ from typing import Any
 from .cli import async_dispatch_cli_action
 from backend.tools.llamaindex_rag.runtime import (
     LOCAL_RAG_SEARCH_TOOL,
+    LOCAL_RAG_SUMMARIZE_TOOL,
     is_rag_tool_name,
     rag_action_for_tool_name,
 )
@@ -333,6 +334,7 @@ _LOCAL_TOOL_NAMES = {
     DOC_REPLACE_SECTION_TOOL_NAME,
     DOC_EXPAND_SECTION_TOOL_NAME,
     LOCAL_RAG_SEARCH_TOOL["function"]["name"],
+    LOCAL_RAG_SUMMARIZE_TOOL["function"]["name"],
 }
 
 
@@ -398,7 +400,7 @@ async def execute_local_agent_tool(
         return {"content": f"No tool needed: {reason}", "attachment": None}
 
     if name == KB_LIST_FILES_TOOL_NAME:
-        payload = await async_dispatch_cli_action("kb.list", scope="all")
+        payload = await async_dispatch_cli_action("kb.list")
         return {"content": json.dumps(payload, ensure_ascii=False), "attachment": None}
 
     if name == KB_LIST_UPLOADS_TOOL_NAME:
@@ -413,7 +415,6 @@ async def execute_local_agent_tool(
             "kb.match_related",
             query=query,
             limit=int(args_dict.get("limit") or 10),
-            scope="all",
         )
         return {"content": json.dumps(payload, ensure_ascii=False), "attachment": None}
 

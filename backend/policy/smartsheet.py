@@ -77,6 +77,33 @@ def build_smartsheet_auth_expired_reply(result_payload: dict[str, Any]) -> str:
     return errmsg
 
 
+_ROW_MODIFY_TOKENS = (
+    "修改", "改一下", "更新", "编辑",
+    "删除这一行", "删掉这行", "移除这行",
+    "把第", "将第",
+)
+
+_ROW_REFERENCE_TOKENS = ("行", "条", "row", "记录")
+
+
+def is_row_modification_request(content: str) -> bool:
+    """Detect if the user is asking to modify or delete existing rows."""
+    text = _text(content)
+    if not text:
+        return False
+    has_modify = any(token in text for token in _ROW_MODIFY_TOKENS)
+    has_row_ref = any(token in text for token in _ROW_REFERENCE_TOKENS)
+    return has_modify and has_row_ref
+
+
+def build_unsupported_row_modify_reply() -> str:
+    return (
+        "目前智能表格暂不支持修改或删除已有行。"
+        "我可以帮你追加新的记录，或者重新创建一张新的智能表格。"
+        "需要我怎么做？"
+    )
+
+
 def is_authorization_expired(result_payload: dict[str, Any]) -> bool:
     errcode = result_payload.get("errcode")
     errmsg = str(result_payload.get("errmsg") or "").lower()

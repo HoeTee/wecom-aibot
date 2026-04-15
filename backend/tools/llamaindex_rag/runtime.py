@@ -84,6 +84,8 @@ def is_rag_tool_name(function_name: str) -> bool:
 
 
 def get_local_rag_tools() -> list[dict[str, object]]:
+    # summarize tool disabled: 40-70s per call due to extra LLM synthesis pass.
+    # Code preserved in LOCAL_RAG_SUMMARIZE_TOOL; re-add here when latency is acceptable.
     return [copy.deepcopy(LOCAL_RAG_SEARCH_TOOL)]
 
 

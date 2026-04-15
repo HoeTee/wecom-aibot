@@ -1,28 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+import asyncio
+from typing import Any
 
-
-class RAGHost(Protocol):
-    tools: list[dict[str, Any]]
-
-    async def call_tool(self, exposed_name: str, args: dict[str, Any]) -> str:
-        ...
-
-
-def _find_rag_tool_name(host: RAGHost) -> str:
-    for tool in host.tools:
-        name = tool["function"]["name"]
-        if name.lower().endswith("llamaindex_rag_query"):
-            return name
-    raise KeyError("Missing llamaindex_rag query tool")
+from backend.tools.llamaindex_rag.runtime import search_local_rag, summarize_local_rag
 
 
 async def execute_rag_action(action: str, **kwargs: Any) -> dict[str, Any]:
-    host = kwargs.get("host")
-    if host is None:
-        raise ValueError("rag actions require host")
-
     if action not in {"rag.search", "rag.summarize"}:
         raise KeyError(f"Unknown rag action: {action}")
 
@@ -30,8 +14,10 @@ async def execute_rag_action(action: str, **kwargs: Any) -> dict[str, Any]:
     if not query:
         raise ValueError("rag action requires query")
 
-    tool_name = _find_rag_tool_name(host)
-    text = await host.call_tool(tool_name, {"query": query})
+    if action == "rag.search":
+        text = await asyncio.to_thread(search_local_rag, query)
+    else:
+        text = await asyncio.to_thread(summarize_local_rag, query)
     return {
         "action": action,
         "query": query,
