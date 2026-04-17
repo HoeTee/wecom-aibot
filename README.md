@@ -30,7 +30,8 @@
 - Python 3.11+
 - Node.js 20+
 - 企业微信管理后台：创建 AI Bot，拿到 `WECOM_BOT_ID` / `WECOM_BOT_SECRET`
-- LLM 服务：OpenAI-compatible endpoint（默认用阿里云 DashScope 的 Qwen）
+- LLM 服务：OpenAI-compatible endpoint（默认用 Moonshot 的 Kimi，模型 `kimi-k2.5`）
+- 本地 RAG（可选）：阿里云 DashScope 的 embedding + rerank
 
 ### 安装
 
@@ -38,7 +39,8 @@ Windows (PowerShell)：
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 npm install
 Copy-Item .env.example .env
 Copy-Item config\mcp_servers.example.json config\mcp_servers.json
@@ -55,6 +57,8 @@ cp .env.example .env
 cp config/mcp_servers.example.json config/mcp_servers.json
 ```
 
+> 后续 `python -m backend.app`、`python -m unittest ...`、`python scripts/...` 都假设 venv 已激活。新开终端记得重新激活（Windows `./.venv/Scripts/Activate.ps1`，macOS/Linux `source .venv/bin/activate`）。
+
 ### 配置
 
 编辑 `.env`，至少填：
@@ -65,7 +69,7 @@ LLM_API_KEY=sk-xxx
 LLM_BASE_URL=https://api.moonshot.cn/v1
 LLM_MODEL=kimi-k2.5
 
-# Embedding / Rerank（本地 RAG 必填）
+# Embedding / Rerank（只要想用本地 RAG/知识库检索就必填；否则留空）
 EMBED_API_KEY=sk-xxx
 EMBED_MODEL=text-embedding-v4
 RERANK_API_KEY=sk-xxx
@@ -74,19 +78,29 @@ RERANK_MODEL=qwen3-rerank
 # 企微 AI Bot（长连接网关必填）
 WECOM_BOT_ID=xxx
 WECOM_BOT_SECRET=xxx
+
+# 网关回 Flask 的地址，默认 127.0.0.1:5000。若改端口记得同步
+BACKEND_BASE_URL=http://127.0.0.1:5000
+
+# 外部 MCP server 清单（默认指向仓库里的 config/mcp_servers.json）
+MCP_SERVERS_CONFIG=config/mcp_servers.json
 ```
+
+完整变量清单见 `.env.example`（含 `TEMPERATURE`/`MAX_TOOL_CALLS` 等调参项）。
 
 编辑 `config/mcp_servers.json`，把企微文档 MCP 的 `url` 换成你自己带 apikey 的地址。
 
 ### 启动
 
-两个进程同时跑：
+两个进程各自一个终端（都需要先激活 venv 再跑后端）：
 
 ```bash
-# 1) 后端（Flask，监听 127.0.0.1:5000）
+# 终端 1 — 后端（Flask，监听 127.0.0.1:5000）
+#   Windows:  .venv\Scripts\Activate.ps1
+#   macOS/Linux:  source .venv/bin/activate
 python -m backend.app
 
-# 2) 企微长连接网关
+# 终端 2 — 企微长连接网关（Node，不需要 venv）
 npm run gateway
 ```
 
@@ -104,18 +118,19 @@ curl http://127.0.0.1:5000/health
 企微客户端
    ↓ 长连接
 gateway/long_connection.ts      Node 端，桥接企微协议
-   ↓ HTTP POST /chat
+   ↓ HTTP POST /chat、/knowledge-base/upload
 backend/entry/http.py           Flask 入口
    ↓
-backend/flow/                   agent 主循环 + chat 编排
-   ├─ policy/                   业务规则、意图识别、能力边界
-   ├─ state/                    SQLite 会话（对话历史、文档绑定、上传文件）
-   ├─ caps/                     能力封装层
-   └─ runtime/                  工具分发（MCP 或本地）
+backend/flow/                   agent 主循环 (agent_core.py) + 消息编排 (chat.py)
+   │
+   ├→ backend/policy/           业务规则：意图识别、能力边界、上传策略
+   ├→ backend/state/            SQLite 会话（对话历史、文档绑定、上传文件）
+   ├→ backend/caps/             能力封装：documents / knowledge_base / rag
+   └→ backend/runtime/          工具分发：外部 MCP host + 本地工具注册
                                    ↓
-                                tools/
-                                   ├─ doc_cli / kb_cli / rag_cli   MCP wrapper
-                                   └─ llamaindex_rag/              本地 RAG
+                                backend/tools/
+                                   ├─ kb_cli.py / rag_cli.py   本地 CLI 入口
+                                   └─ llamaindex_rag/          本地向量检索
 ```
 
 详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
@@ -124,15 +139,20 @@ backend/flow/                   agent 主循环 + chat 编排
 
 | 目录 | 内容 |
 |------|------|
-| `backend/flow/` | agent 主循环 (`agent_core.py`) + 消息入口 (`chat.py`) |
-| `backend/policy/` | 能力边界、意图识别、上传策略 |
+| `backend/app.py` | Flask 应用入口（`python -m backend.app`） |
+| `backend/entry/http.py` | HTTP 路由：`/chat`、`/knowledge-base/upload`、`/health` |
+| `backend/flow/` | agent 主循环 (`agent_core.py`) + 消息编排 (`chat.py`) + 上传处理 (`upload.py`) |
+| `backend/policy/` | 能力边界、意图识别、上传策略、payload 生成 |
 | `backend/state/store.py` | SQLite 持久化（conversation_turns / tool_calls / session_docs / session_uploaded_files） |
+| `backend/caps/` | 能力封装层（documents / knowledge_base / rag） |
+| `backend/runtime/` | 外部 MCP host (`host.py`) + 本地工具注册 (`local_tools.py`) + 分发 (`cli.py`) |
+| `backend/tools/kb_cli.py` / `rag_cli.py` | 本地工具的 CLI 入口（知识库文件管理 / 本地 RAG 检索） |
 | `backend/tools/llamaindex_rag/` | 本地 RAG：PDFReader + 向量检索 + Qwen reranker |
-| `backend/tools/*_cli.py` | MCP 工具 wrapper（doc / kb / rag） |
-| `config/mcp_servers.json` | 外部 MCP server 配置 |
+| `config/mcp_servers.json` | 外部 MCP server 配置（企微文档/智能表格能力） |
 | `knowledge_base/` | 用户上传的 PDF（不入版本控制） |
-| `prompts/system/assistant_v1.md` | 系统 prompt（含能力边界声明） |
+| `prompts/system/assistant_v1.md` | 系统 prompt（含能力边界声明与模型身份约束） |
 | `data/logs/flow/flow_runtime.log` | 结构化 JSON 运行日志 |
+| `data/logs/mcp/<server>_stderr.log` | stdio MCP server 的 stderr（排查启动失败） |
 | `data/memory.sqlite3` | 会话状态数据库 |
 
 ## 开发
