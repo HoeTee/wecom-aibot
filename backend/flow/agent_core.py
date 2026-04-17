@@ -378,7 +378,7 @@ class Agent:
         if intent in _write_intents:
             parts.append(
                 "约束：create_doc 只是创建空文档，不算完成。"
-                "你必须在创建文档后继续调用 edit_doc_content 或 doc__append_section 写入正文，"
+                "你必须在创建文档后继续调用 edit_doc_content 写入正文，"
                 "正文写入成功后才能回复用户。"
                 "写入正文时不要以文档标题开头，因为 create_doc 已经设置了标题，重复会导致双重标题。"
                 "不要调用 kb__export_file，那是用户要求导出原始 PDF 时才用的，总结/写入文档不需要它。"
@@ -601,7 +601,7 @@ class Agent:
             )
         return (
             "你还没有把内容写入文档。创建文档只是第一步，"
-            "请立即继续调用正文写入工具（如 edit_doc_content / doc__append_section）完成写入，"
+            "请立即继续调用 edit_doc_content 完成正文写入，"
             "不要只输出文字。"
         )
 
