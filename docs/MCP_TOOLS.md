@@ -11,7 +11,6 @@
 - 当前动作层开始收敛成 CLI 风格：
   - `backend/runtime/cli.py`
   - `backend/tools/kb_cli.py`
-  - `backend/tools/doc_cli.py`
   - `backend/tools/rag_cli.py`
 - 本地 `stdio` MCP 服务如果启动即退出，应优先检查 `data/logs/mcp/<server_name>_stderr.log`
 - `runtime` 在 stdio 连接失败时，应同时记录 `command`、`args`、`cwd` 和对应 stderr 日志路径
@@ -50,11 +49,6 @@ kb__match_related_files
 kb__export_file
 kb__rename_file
 kb__delete_file
-doc__read_markdown
-doc__append_section
-doc__preview_replace
-doc__replace_section
-doc__expand_section
 llamaindex_rag__llamaindex_rag_search
 ```
 
@@ -62,6 +56,7 @@ llamaindex_rag__llamaindex_rag_search
 
 - `kb__list_recent_uploads` 在本地 runtime 里有实现，但当前没有加入 agent 可见工具列表
 - `llamaindex_rag__llamaindex_rag_summarize` 有底层实现，但当前没有暴露给 agent，原因是延迟较高
+- 历史版本曾暴露过 `doc__read_markdown` / `doc__append_section` / `doc__preview_replace` / `doc__replace_section` / `doc__expand_section` 一族本地工具；当前版本已从 agent 可见列表移除，运行时侧同时加了硬拦截。所有文档正文写入统一走外部 MCP 的 `edit_doc_content`
 
 ## 各工具家族的实际边界
 
@@ -84,26 +79,6 @@ llamaindex_rag__llamaindex_rag_search
 - 操作对象是本地 PDF 文件，不是文档正文
 - `kb__rename_file` 和 `kb__delete_file` 必须带 `confirmed=true`
 - 目标文件通过 `file_name` 或 `stored_path` 指定
-
-### `doc__*`
-
-当前对应：
-
-- `backend/tools/doc_cli.py`
-
-职责：
-
-- 读取企微文档 Markdown
-- 在已有文档上追加章节
-- 预览将被替换的章节
-- 替换章节
-- 扩写并插入新章节
-
-关键约束：
-
-- 必须有 `doc_id` 或 `doc_url`
-- 这些工具本身不直接连企微，而是继续走外部 MCP 的读写能力
-- `doc__append_section` / `doc__replace_section` / `doc__expand_section` 本质是“先读全文 Markdown，再写回新全文”
 
 ### `wecom_*` / `wecom_docs__*`
 
@@ -160,7 +135,6 @@ llamaindex_rag__llamaindex_rag_search
 
 - `backend/runtime/cli.py`
 - `backend/tools/kb_cli.py`
-- `backend/tools/doc_cli.py`
 - `backend/tools/rag_cli.py`
 
 ## 日志定位

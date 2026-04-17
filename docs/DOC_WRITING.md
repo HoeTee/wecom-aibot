@@ -18,7 +18,7 @@
 当前必须遵守：
 
 1. 先调用外部 MCP 的 `create_doc`
-2. 再继续调用正文写入动作
+2. 紧接着调用 `edit_doc_content` 写正文（`content_type` 只能是 `1`，运行时已硬拦截）
 3. 只有正文真正写入成功后，才能告诉用户“已完成”
 
 原因：
@@ -31,64 +31,26 @@
 当前默认优先编辑已绑定文档。  
 只有用户明确要求“重新生成 / 新建一份”时，才不复用当前绑定文档。
 
-文档续写或改写时，当前可用的本地工具是：
+无论是追加、覆盖还是改写，都统一走一个工具：
 
-- `doc__read_markdown`
-- `doc__append_section`
-- `doc__preview_replace`
-- `doc__replace_section`
-- `doc__expand_section`
+- 外部 MCP 的 `edit_doc_content`
 
-## 章节级写入的实际做法
-
-### `doc__append_section`
-
-用途：
-
-- 在文档末尾追加一节
-- 新增一个章节
-- 或根据相关章节插入一个下级小节
-
-### `doc__preview_replace`
-
-用途：
-
-- 先读出当前最像目标的章节
-- 给替换动作提供 section payload
-
-### `doc__replace_section`
-
-用途：
-
-- 用新的 Markdown 章节替换最相关 section
-
-### `doc__expand_section`
-
-用途：
-
-- 在相关章节下扩写一个新小节
-- 或直接新增一个顶层章节
+本地曾经存在的 `doc__read_markdown` / `doc__append_section` / `doc__preview_replace` / `doc__replace_section` / `doc__expand_section` 已经从 agent 工具面下线，运行时同时加了硬拦截。旧日志和旧文档里出现这些名字，只代表历史实现。
 
 ## Markdown 约束
 
-当前本地文档工具会做两件事：
+写入正文时要注意：
 
-1. 去掉正文开头与标题重复的 heading
-2. 去掉连续重复的 heading
-
-因此写正文时要注意：
-
-- 不要把文档标题再写成正文第一行 H1
+- 不要把文档标题再写成正文第一行 H1（`create_doc` 已经设置过标题，重复会导致双重标题）
 - 章节正文应该从内容本身开始，而不是再重复一次 `## 标题`
 
 ## 读文档的边界
 
-`doc__read_markdown` 是内部编辑辅助能力，不是“给用户展示全文”的能力。
+当前实现**不支持**把文档内容回读给用户，也不依赖本地读取做编辑辅助：
 
-也就是说：
-
-- agent 可以为了编辑而读取文档 Markdown
-- 但不能把读取到的全文直接当聊天回复发给用户
+- 没有暴露任何 `doc__read_markdown` 类工具
+- 用户让 agent “查看 / 给我看 / 展示” 某份文档时，应直接告知“暂不支持”
+- 需要覆盖或改写文档时，让模型按用户意图生成新正文，整体通过 `edit_doc_content` 写回即可
 
 ## 写作风格的当前约束
 

@@ -112,22 +112,18 @@
 - 导出会附带文件附件
 - 重命名和删除要求 `confirmed=true`
 
-## 流程 7：文档章节追加 / 替换 / 扩写
+## 流程 7：文档正文追加 / 覆盖 / 改写
 
-当前本地文档工具的真实流程是：
+当前流程已经简化：
 
-1. 读取当前文档 Markdown
-2. 解析标题层级
-3. 根据 query 或 title 选最相关 section
-4. 生成新的 Markdown
-5. 整体写回企微文档
+1. agent 根据当前绑定文档（或本轮新建的文档）选目标 `docid`
+2. 直接调用外部 MCP 的 `edit_doc_content`
+3. `content_type` 统一走纯文本写入（`1`），运行时硬拦截其它取值
 
-这套流程对应：
+说明：
 
-- `doc__append_section`
-- `doc__preview_replace`
-- `doc__replace_section`
-- `doc__expand_section`
+- 本地旧版的 `doc__append_section` / `doc__preview_replace` / `doc__replace_section` / `doc__expand_section` 已从 agent 工具面下线，运行时同时加了硬拦截。所有“追加 / 覆盖 / 改写”都映射到一次 `edit_doc_content`
+- 如果需要“基于已有正文续写”，当前实现不会回读文档；模型根据对话上下文与来源材料生成完整的新正文，整体写回
 
 ## 流程 8：智能表格请求
 
