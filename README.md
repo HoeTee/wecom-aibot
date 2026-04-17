@@ -2,7 +2,7 @@
 
 企业微信文档工作流 agent。用户在企微聊天里发消息或上传 PDF，bot 负责总结、整理、写入企微文档或智能表格。
 
-> ⚠️ **推荐在个人聊天窗口（单聊）使用**。群聊场景下意图识别易被多人插话污染、文档绑定也会串会话，不推荐。
+> ⚠️ **推荐在个人聊天窗口（单聊）使用**。**知识库文件上传目前只支持 PDF 一种格式**，其它格式（Word / Excel / 图片 / txt 等）一律拒绝。群聊场景下意图识别易被多人插话污染、文档绑定也会串会话，不推荐。
 
 ## 能做什么
 
@@ -62,8 +62,8 @@ cp config/mcp_servers.example.json config/mcp_servers.json
 ```env
 # LLM（必填）
 LLM_API_KEY=sk-xxx
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-LLM_MODEL=qwen-plus
+LLM_BASE_URL=https://api.moonshot.cn/v1
+LLM_MODEL=kimi-k2.5
 
 # Embedding / Rerank（本地 RAG 必填）
 EMBED_API_KEY=sk-xxx
@@ -154,6 +154,16 @@ python scripts/cleanup_artifacts.py
 - **RAG 命中页码不合理**：调 `backend/tools/llamaindex_rag/llamaindex/engine.py` 里的 `similarity_top_k` / `reranker_top_k` / `min_relevance_score`
 - **知识库上传失败**：确认是 PDF，且在个人聊天（非群聊）中上传
 - **agent 越权承诺**（例如承诺"查看表格"）：检查 prompt 的"不支持的能力"段是否被正确应用
+
+## 项目不足与可优化方向
+
+当前版本仍有若干明确的改进空间，欢迎后续迭代：
+
+- **文件上传类型受限**：目前只接受 PDF，Word / Excel / 图片 / Markdown / txt 等格式无法入库。后续可扩展解析器，覆盖办公场景常见文档类型。
+- **检索算法可优化**：目前知识库检索基于 LlamaIndex 的向量检索（embedding + rerank），在长文档、表格型内容、跨文档关联问答上召回和相关性仍有不足。可考虑混合检索（BM25 + 向量）、层级检索、query 改写等方式。
+- **工具边界仍可细化**：部分能力（如智能表格改行、文档内容读回展示、文档分段覆盖）尚未支持；工具参数 schema 与 system prompt 的约束也可以进一步收紧，避免模型在边界情况下幻觉。
+- **回答结构可迭代**：当前回复格式主要靠 prompt 约束，针对不同场景（结构化总结、长文档摘要、表格输出）仍可通过模板化或结构化输出来提升一致性。
+- **观测与调试**：flow / cli 日志齐备，但缺少端到端 trace 视图与自动化评测。
 
 ## 其它文档
 

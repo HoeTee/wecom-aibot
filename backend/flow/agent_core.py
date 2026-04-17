@@ -78,6 +78,43 @@ Rules:
 """
 
 
+def _is_kimi_k25_model(settings: Settings) -> bool:
+    return str(settings.model or "").strip().lower().startswith("kimi-k2.5")
+
+
+def _build_chat_completion_kwargs(
+    settings: Settings,
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "model": settings.model,
+        "messages": messages,
+    }
+    if tools:
+        kwargs["tools"] = tools
+
+    kimi_k25 = _is_kimi_k25_model(settings)
+    if tool_choice is not None:
+        # Kimi K2.5 rejects tool_choice="required" while thinking is enabled.
+        kwargs["tool_choice"] = "auto" if kimi_k25 and tool_choice == "required" else tool_choice
+
+    if not kimi_k25:
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if top_p is not None:
+            kwargs["top_p"] = top_p
+        if seed is not None:
+            kwargs["seed"] = seed
+
+    return kwargs
+
+
 def _parse_json_object(raw: str) -> dict[str, Any]:
     text = str(raw or "").strip()
     if not text:
@@ -111,8 +148,15 @@ def _normalize_intent_packet(packet: dict[str, Any], message: str) -> dict[str, 
     if not isinstance(missing, list):
         missing = []
 
+    _smartsheet_signals = ("智能表格", "smartsheet", "表格")
+    _smartsheet_signal_hit = any(s in message_text or s in message_text.lower() for s in _smartsheet_signals)
+    # "表格" alone is ambiguous — only treat it as smartsheet if paired with
+    # an action keyword, to avoid hijacking Markdown-table / doc-table requests.
+    if not _smartsheet_signal_hit and "表格" in message_text:
+        _action_signals = ("创建", "生成", "建一个", "做一个", "新建", "更新", "添加", "追加", "重新创建")
+        _smartsheet_signal_hit = any(a in message_text for a in _action_signals)
     if (
-        ("智能表格" in message_text or "smartsheet" in message_text.lower())
+        _smartsheet_signal_hit
         and intent_family in {"knowledge_base", "document", "general"}
         and intent in {"kb.list", "kb.unknown", "doc.create", "doc.unknown", "agent.chat"}
     ):
@@ -190,11 +234,13 @@ async def classify_intent_packet(
     try:
         completion = await asyncio.wait_for(
             client.chat.completions.create(
-                model=settings.model,
-                temperature=0.0,
-                top_p=1.0,
-                seed=settings.seed,
-                messages=messages,
+                **_build_chat_completion_kwargs(
+                    settings,
+                    messages=messages,
+                    temperature=0.0,
+                    top_p=1.0,
+                    seed=settings.seed,
+                )
             ),
             timeout=settings.routing_timeout_seconds,
         )
@@ -202,6 +248,10 @@ async def classify_intent_packet(
         return _normalize_intent_packet(_parse_json_object(content), message)
     except Exception:
         return _normalize_intent_packet({}, message)
+
+
+class _AuthExpiredError(Exception):
+    """Raised when a tool call returns errcode 850003 (authorization expired)."""
 
 
 class ToolRuntime(Protocol):
@@ -256,6 +306,9 @@ class Agent:
         self.invalid_tool_argument_rounds = 0
         self._completion_nudged = False
         self._current_docid: str | None = None  # docid from this request's create_doc
+        self._auth_expired_message: str | None = None  # set when 850003 detected
+        self._known_sheet_ids: set[str] = set()  # sheet_ids from successful get_sheet calls
+        self._known_field_titles: set[str] = set()  # field_titles from successful get_fields calls
         self._exec_start_idx: int = 0  # set after chat_history, marks where THIS request's messages begin
 
         if system_prompt:
@@ -504,6 +557,20 @@ class Agent:
             for name in called
         )
 
+        # Cross-family tolerance: if intent says doc but agent successfully used
+        # smartsheet write tools (or vice versa), treat as complete to avoid
+        # nudge loops caused by intent misclassification.
+        if not has_write:
+            alt_tokens = (
+                self._SMARTSHEET_WRITE_TOKENS if intent.startswith("doc.") else self._WRITE_TOOL_TOKENS
+            )
+            has_alt_write = any(
+                any(tok in name for tok in alt_tokens)
+                for name in called
+            )
+            if has_alt_write:
+                return None
+
         # Fast path: no write tool called at all → nudge immediately
         if not has_write:
             return self._fire_completion_nudge(intent, called)
@@ -608,9 +675,11 @@ class Agent:
         try:
             completion = await asyncio.wait_for(
                 self.client.chat.completions.create(
-                    model=self.settings.model,
-                    temperature=0.0,
-                    messages=[{"role": "user", "content": prompt}],
+                    **_build_chat_completion_kwargs(
+                        self.settings,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                    )
                 ),
                 timeout=10.0,
             )
@@ -685,6 +754,44 @@ class Agent:
                 # tool_message_from_call(tool_call) which re-parses the
                 # ORIGINAL tool_call.function.arguments (with the stale docid).
 
+        # Validate smartsheet sheet_id: reject fabricated sheet_ids
+        if "smartsheet_" in fn_lower and fn_lower != "wecom_docs__smartsheet_get_sheet" and "sheet_id" in call_args:
+            sheet_id = str(call_args.get("sheet_id") or "").strip()
+            if self._known_sheet_ids and sheet_id and sheet_id not in self._known_sheet_ids:
+                self._log(f"Blocked fabricated sheet_id: {sheet_id}")
+                return (
+                    f"sheet_id \"{sheet_id}\" 不是有效的子表 ID。"
+                    f"已知的子表 ID：{', '.join(self._known_sheet_ids)}。"
+                    "请使用 smartsheet_get_sheet 返回的真实 sheet_id。"
+                )
+
+        # Validate smartsheet field names in add_records: reject fabricated field titles
+        if "smartsheet_add_records" in fn_lower and self._known_field_titles:
+            records = call_args.get("records")
+            if isinstance(records, list):
+                bad_fields: list[str] = []
+                for record in records:
+                    values = record.get("values") if isinstance(record, dict) else None
+                    if isinstance(values, dict):
+                        for key in values:
+                            if str(key).strip() not in self._known_field_titles and key not in bad_fields:
+                                bad_fields.append(str(key).strip())
+                if bad_fields:
+                    self._log(f"Blocked records with unknown fields: {bad_fields}")
+                    return (
+                        f"以下字段名不存在于当前子表：{', '.join(bad_fields)}。"
+                        f"当前子表的字段名为：{', '.join(sorted(self._known_field_titles))}。"
+                        "请使用 smartsheet_get_fields 返回的真实 field_title。"
+                    )
+
+        # Force content_type=1 for edit_doc_content — the WeCom MCP tool
+        # schema only accepts [1].  LLM sometimes hallucinates other values.
+        if "edit_doc_content" in fn_lower:
+            raw_ct = call_args.get("content_type")
+            if raw_ct not in (1, "1"):
+                self._log(f"Fixing content_type {raw_ct!r}→1 for edit_doc_content")
+                call_args["content_type"] = 1
+
         # Strip leading H1 from edit_doc_content — create_doc already set the
         # document title; if content starts with `# Title`, WeCom renders a
         # duplicate title at the top of the body.
@@ -738,6 +845,35 @@ class Agent:
                 self._current_docid = str(parsed_result["docid"])
                 self._log(f"Captured docid: {self._current_docid[:30]}...")
 
+        # Capture sheet_ids from successful get_sheet
+        if "smartsheet_get_sheet" in fn_lower:
+            parsed_result = _parse_json_object(result_str)
+            if parsed_result.get("errcode") == 0:
+                for sheet in parsed_result.get("sheet_list") or []:
+                    sid = str(sheet.get("sheet_id") or "").strip()
+                    if sid:
+                        self._known_sheet_ids.add(sid)
+                self._log(f"Known sheet_ids: {self._known_sheet_ids}")
+
+        # Capture field_titles from successful get_fields
+        if "smartsheet_get_fields" in fn_lower:
+            parsed_result = _parse_json_object(result_str)
+            if parsed_result.get("errcode") == 0:
+                for field in parsed_result.get("fields") or []:
+                    title = str(field.get("field_title") or "").strip()
+                    if title:
+                        self._known_field_titles.add(title)
+                self._log(f"Known field_titles: {self._known_field_titles}")
+
+        # Also capture field_titles from successful add_fields / update_fields
+        if "smartsheet_add_fields" in fn_lower or "smartsheet_update_fields" in fn_lower:
+            parsed_result = _parse_json_object(result_str)
+            if parsed_result.get("errcode") == 0:
+                for field in parsed_result.get("fields") or []:
+                    title = str(field.get("field_title") or "").strip()
+                    if title:
+                        self._known_field_titles.add(title)
+
         if self.on_tool_result:
             try:
                 self.on_tool_result(function_name, call_args, result_str)
@@ -766,6 +902,17 @@ class Agent:
                 "result_status": result_status,
             },
         )
+
+        # Hard stop on authorization expired — no point retrying.
+        parsed_err = _parse_json_object(result_str)
+        if parsed_err.get("errcode") == 850003:
+            help_msg = str(parsed_err.get("help_message") or "").strip()
+            if help_msg:
+                self._auth_expired_message = help_msg
+            else:
+                self._auth_expired_message = "当前机器人的文档使用权限已过期，请联系机器人创建者重新授权。"
+            raise _AuthExpiredError(self._auth_expired_message)
+
         return result_str
 
     @staticmethod
@@ -801,7 +948,14 @@ class Agent:
             return "You have used up all your tool calls. Please provide the final answer."
 
         for tool_call in tool_calls:
-            result = await self._execute_a_tool(tool_call)
+            try:
+                result = await self._execute_a_tool(tool_call)
+            except _AuthExpiredError:
+                self._emit_flow(
+                    "stop_reason",
+                    {"code": "guard_stop", "detail": "auth_expired_850003", "layer": "flow"},
+                )
+                return self._auth_expired_message or "当前机器人的文档使用权限已过期，请联系机器人创建者重新授权。"
             self.messages.append(
                 {
                     "role": "tool",
@@ -831,16 +985,18 @@ class Agent:
             force_tool = self.tools and self.tool_call_count == 0
 
             completion = await self.client.chat.completions.create(
-                model=self.settings.model,
-                temperature=self.settings.temperature,
-                top_p=self.settings.top_p,
-                seed=self.settings.seed,
-                messages=self.messages,
-                tools=self.tools if self.tools else None,
-                tool_choice=(
-                    "required" if force_tool
-                    else ("auto" if self.tools else None)
-                ),
+                **_build_chat_completion_kwargs(
+                    self.settings,
+                    messages=self.messages,
+                    tools=self.tools if self.tools else None,
+                    tool_choice=(
+                        "required" if force_tool
+                        else ("auto" if self.tools else None)
+                    ),
+                    temperature=self.settings.temperature,
+                    top_p=self.settings.top_p,
+                    seed=self.settings.seed,
+                )
             )
 
             response_message = completion.choices[0].message
@@ -919,6 +1075,9 @@ class Agent:
 
                 forced = await self._process_tool_calls(response_message.tool_calls)
                 if forced:
+                    # Auth expired: return the message directly as final answer
+                    if self._auth_expired_message:
+                        return forced
                     self.messages.pop()
                     self.messages.append(
                         {

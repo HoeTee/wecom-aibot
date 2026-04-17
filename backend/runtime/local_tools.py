@@ -339,6 +339,10 @@ _LOCAL_TOOL_NAMES = {
 
 
 def get_local_agent_tools() -> list[dict[str, object]]:
+    # DOC_READ_MARKDOWN_TOOL and all doc section tools (append, replace,
+    # expand, preview_replace) are excluded — they all depend on
+    # get_doc_content which the MCP server does not expose.
+    # Agent must use the MCP-native edit_doc_content directly.
     return [
         copy.deepcopy(AGENT_NO_TOOL_NEEDED_TOOL),
         copy.deepcopy(KB_LIST_FILES_TOOL),
@@ -346,11 +350,6 @@ def get_local_agent_tools() -> list[dict[str, object]]:
         copy.deepcopy(KB_EXPORT_FILE_TOOL),
         copy.deepcopy(KB_RENAME_FILE_TOOL),
         copy.deepcopy(KB_DELETE_FILE_TOOL),
-        copy.deepcopy(DOC_READ_MARKDOWN_TOOL),
-        copy.deepcopy(DOC_APPEND_SECTION_TOOL),
-        copy.deepcopy(DOC_PREVIEW_REPLACE_TOOL),
-        copy.deepcopy(DOC_REPLACE_SECTION_TOOL),
-        copy.deepcopy(DOC_EXPAND_SECTION_TOOL),
         copy.deepcopy(LOCAL_RAG_SEARCH_TOOL),
     ]
 
@@ -390,6 +389,20 @@ async def execute_local_agent_tool(
         payload = await execute_rag_action(rag_action, query=args_dict.get("query"))
         return {
             "content": payload.get("text") or "",
+            "attachment": None,
+        }
+
+    # Hard block: all doc tools that depend on get_doc_content (not available in MCP).
+    _blocked_doc_tools = {
+        DOC_READ_MARKDOWN_TOOL_NAME,
+        DOC_APPEND_SECTION_TOOL_NAME,
+        DOC_PREVIEW_REPLACE_TOOL_NAME,
+        DOC_REPLACE_SECTION_TOOL_NAME,
+        DOC_EXPAND_SECTION_TOOL_NAME,
+    }
+    if name in _blocked_doc_tools:
+        return {
+            "content": "此操作不支持。当前无法读取文档内容，请直接调用 edit_doc_content 写入。",
             "attachment": None,
         }
 

@@ -6,21 +6,21 @@ from llama_index.readers.file import PDFReader
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_PAPER_DIR = PROJECT_ROOT / "knowledge_base"
-LEGACY_DATA_DIR = PROJECT_ROOT / "docs"
+FALLBACK_DATA_DIR = PROJECT_ROOT / "docs"
 
 
 class LlamaIndexLoader:
 
     def __init__(
-            self, 
+            self,
             data_dir: Path | None = None
-        ) -> None: 
+        ) -> None:
         resolved_dir = data_dir
         if resolved_dir is None:
             if DEFAULT_PAPER_DIR.exists():
                 resolved_dir = DEFAULT_PAPER_DIR
             else:
-                resolved_dir = LEGACY_DATA_DIR
+                resolved_dir = FALLBACK_DATA_DIR
         self.data_dir = Path(resolved_dir).resolve()
     
 

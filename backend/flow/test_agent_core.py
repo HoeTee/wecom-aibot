@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 
-from backend.flow.agent_core import Agent, Settings
+from backend.flow.agent_core import Agent, Settings, _build_chat_completion_kwargs
 from backend.runtime.local_tools import AGENT_NO_TOOL_NEEDED_TOOL
 
 
@@ -156,6 +156,49 @@ class AgentInvalidToolArgumentsTests(unittest.TestCase):
         result = asyncio.run(agent.chat("test input"))
 
         self.assertIn("工具调用参数连续生成失败", result)
+
+
+class KimiK25CompatibilityTests(unittest.TestCase):
+    def test_kimi_k25_omits_sampling_overrides(self) -> None:
+        settings = Settings.model_construct(
+            api_key="test-key",
+            base_url="https://api.moonshot.cn/v1",
+            model="kimi-k2.5",
+            temperature=0.0,
+            top_p=0.01,
+            seed=42,
+        )
+
+        kwargs = _build_chat_completion_kwargs(
+            settings,
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.0,
+            top_p=0.01,
+            seed=42,
+        )
+
+        self.assertNotIn("temperature", kwargs)
+        self.assertNotIn("top_p", kwargs)
+        self.assertNotIn("seed", kwargs)
+
+    def test_kimi_k25_downgrades_required_tool_choice_to_auto(self) -> None:
+        settings = Settings.model_construct(
+            api_key="test-key",
+            base_url="https://api.moonshot.cn/v1",
+            model="kimi-k2.5",
+            temperature=0.0,
+            top_p=0.01,
+            seed=42,
+        )
+
+        kwargs = _build_chat_completion_kwargs(
+            settings,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[AGENT_NO_TOOL_NEEDED_TOOL],
+            tool_choice="required",
+        )
+
+        self.assertEqual(kwargs["tool_choice"], "auto")
 
 
 if __name__ == "__main__":
