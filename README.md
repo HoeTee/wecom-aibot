@@ -14,14 +14,15 @@
 
 | 能做 | 不能做 |
 |------|--------|
-| 上传 PDF 入知识库（仅个人聊天） | 群聊内上传文件 |
+| 上传 PDF 入知识库（仅个人聊天，直接在窗口发送文件即可） | 群聊内上传文件 |
+| 上传后台自动触发向量索引重建 | 同步等待索引完成 |
 | 创建文档 + 写入正文 | 把文档内容展示给用户看 |
 | 追加表格记录、改列结构 | 查看/读取/浏览表格行内容 |
 | 追加表格行 | 修改/删除已有行 |
 | 知识库文件列表、重命名、删除、导出 PDF | 修改/删除 PDF 内部内容 |
 | 仅 PDF 入知识库 | Word / Excel / 图片 / txt 入知识库 |
 
-能力清单与系统 prompt (`prompts/system/assistant_v1.md`) 保持一致。agent 遇到边界外请求会直接回复"暂不支持"。
+能力清单与系统 prompt (`prompts/system/assistant_v1.md`) 保持一致。agent 遇到边界外请求会直接回复"暂不支持"；但"把 PDF 加入知识库"本身是产品固有能力，agent 会指引用户直接在个人聊天发送文件，而不是回"不支持"。
 
 ## 快速开始
 
@@ -168,12 +169,22 @@ python scripts/check_layers.py
 python scripts/cleanup_artifacts.py
 ```
 
+## 上传与索引行为
+
+用户在个人聊天窗口直接发送 PDF 即可入知识库，流程是固化的 HTTP 端点（`POST /knowledge-base/upload`），**不是 agent 可调用的工具**。入库后 `backend/flow/upload.py` 会根据 `upload_action`（`added` / `replaced` / `unchanged` / `duplicate_content`）决定是否触发后台索引重建：
+
+- `added` / `replaced` → 调 `schedule_index_rebuild(file_name)`，唤醒 `IndexRebuildScheduler` 的守护线程重建向量索引；多次快速上传会被合并（coalesce）成至多一次额外重建
+- `unchanged` / `duplicate_content` → 不改动 `knowledge_base/*.pdf`，不触发重建
+
+索引重建期间（`_BUILD_LOCK` 被占用），`llamaindex_rag__llamaindex_rag_search` 会 fail-fast 返回结构化错误 `{"error_code":"index_busy","pending_files":[...],"eta_seconds":N}`，agent 按 prompt 的"检索正忙"规则提示用户稍等重试，不改道调其它工具。
+
 ## 故障排查
 
 - **文档写入返回 `errcode=0` 但内容为空**：`agent_core.py` 有 docid 自动纠错逻辑，若仍异常检查 `data/logs/flow/flow_runtime.log` 里最近的 `tool_called` 事件看实际写入的 docid
 - **RAG 命中页码不合理**：调 `backend/tools/llamaindex_rag/llamaindex/engine.py` 里的 `similarity_top_k` / `reranker_top_k` / `min_relevance_score`
 - **知识库上传失败**：确认是 PDF，且在个人聊天（非群聊）中上传
 - **agent 越权承诺**（例如承诺"查看表格"）：检查 prompt 的"不支持的能力"段是否被正确应用
+- **上传后检索提示"正在建立索引"**：属正常现象，`IndexRebuildScheduler` 在后台重建向量索引，等 `pending_files` 清零后再发一遍问题即可；若长时间不结束看 `data/logs/flow/flow_runtime.log` 里的 `index_rebuild_scheduled` 与 `rag_index_built` 事件
 
 ## 项目不足与可优化方向
 
