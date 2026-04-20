@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+from backend.tools.llamaindex_rag.llamaindex.index import IndexBusy
+from backend.tools.llamaindex_rag.scheduler import get_scheduler
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -141,11 +145,25 @@ def _validate_query(query: str) -> str:
     return query_text
 
 
+def _busy_payload() -> str:
+    status = get_scheduler().status()
+    payload = {
+        "error_code": "index_busy",
+        "pending_files": list(status.get("pending_files") or []),
+        "eta_seconds": int(status.get("eta_seconds") or 0),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def search_local_rag(query: str) -> str:
     query_text = _validate_query(query)
     logger.info("search_start query=%s", query_text[:200])
     try:
         result = get_rag_engine().search(query_text)
+    except IndexBusy:
+        busy_text = _busy_payload()
+        logger.info("search_busy payload=%s", busy_text)
+        return busy_text
     except Exception:
         logger.exception("search_failed query=%s", query_text[:200])
         raise

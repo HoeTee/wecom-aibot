@@ -148,7 +148,7 @@ class LlamaIndexRAGEngine:
         return summary_text or "No summary generated."
 
     def search(self, query: str) -> str:
-        bundle = self.builder.build()
+        bundle = self.builder.build_or_fail()
         content_query = self._content_query(query)
 
         retriever = bundle.vector_index.as_retriever(similarity_top_k=self.similarity_top_k)
