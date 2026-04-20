@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from backend.caps.knowledge_base import sha256_bytes, store_pdf_in_knowledge_base
+from backend.caps.rag import schedule_index_rebuild
 from backend.policy.payloads import build_reply_generated_payload, build_request_received_payload, build_stop_reason_payload
 from backend.policy.upload import (
     UploadValidationError,
@@ -55,6 +56,18 @@ def process_upload(form: Any, uploaded_file: Any) -> tuple[dict[str, Any], int]:
     )
 
     emit_flow("flow", "route_selected", build_upload_route_payload(file_name, action))
+
+    if action in {"added", "replaced"}:
+        schedule_result = schedule_index_rebuild(file_name)
+        emit_flow(
+            "flow",
+            "index_rebuild_scheduled",
+            {
+                "file_name": file_name,
+                "scheduled": bool(schedule_result.get("scheduled")),
+                "pending_files": list(schedule_result.get("pending_files") or []),
+            },
+        )
 
     user_marker = build_upload_user_marker(file_name)
     assistant_reply = build_upload_reply(file_name, action, matched_file_name)
