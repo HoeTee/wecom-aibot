@@ -59,7 +59,10 @@
 3. 调 `backend.caps.knowledge_base.store_pdf_in_knowledge_base`
 4. 写入 `knowledge_base/`
 5. 保存最近上传状态到 `session_uploaded_files`
-6. 返回上传结果给用户
+6. 如果 `upload_action` 是 `added` / `replaced`，调 `backend.caps.rag.schedule_index_rebuild(file_name)` 触发后台索引重建；写入 `index_rebuild_scheduled` flow 事件，不阻塞响应
+7. 返回上传结果给用户
+
+后台索引由 `backend/tools/llamaindex_rag/scheduler.py` 的 `IndexRebuildScheduler` 维护。它在 daemon 线程里串行调用 `LlamaIndexBuilder.build()`，多次快速触发会合并成单次（或至多一次重入），对外暴露 `status()` 供检索端查询剩余文件数和预估秒数。
 
 ## 运行时层级
 
@@ -255,6 +258,16 @@
 - `replaced`
 - `unchanged`
 - `duplicate_content`
+
+## RAG 检索与索引并发
+
+检索路径由 `backend/tools/llamaindex_rag/llamaindex/engine.py` 的 `search()` 驱动，它调用 `builder.build_or_fail()`。这个方法和 scheduler 共用同一把 `_BUILD_LOCK`：
+
+- 正常情况：lock 空闲，`build_or_fail()` 做一次增量 diff 后返回索引句柄，检索正常进行
+- 后台正在重建：lock 被 scheduler worker 持有，`build_or_fail()` 立即抛出 `IndexBusy`
+- `search_local_rag` 捕获 `IndexBusy` 后查 `get_scheduler().status()`，返回 `{"error_code":"index_busy","pending_files":[...],"eta_seconds":N}` 给上层 agent
+
+这样检索不会阻塞在长时间重建上；agent 从结构化错误里读到 busy 信号后，按 prompt 规则让用户稍等重试。
 
 ## 日志与运行产物
 

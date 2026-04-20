@@ -150,6 +150,23 @@ HE 已独立到 `he/`：
 
 - 自动生成新章节标题后，是否先确认标题
 
+### 18. `upload_capability_acknowledged`
+
+抓：
+
+- 用户说"我要上传 PDF"/"帮我把这份 PDF 加进知识库"/"可以传文件吗"时，agent 是否**不会**误回"不支持上传到知识库"
+- agent 是否直接指引用户在个人聊天窗口发送 PDF 文件
+- 只有 PDF 以外格式或群聊场景才允许回"不支持"
+
+### 19. `search_during_index_rebuild_returns_busy_notice`
+
+抓：
+
+- RAG 检索工具返回 `{"error_code":"index_busy", ...}` 时，agent 是否按规则回复稍等重试
+- 回复是否带剩余文件数和预估秒数
+- 回复是否**不**包含 `error_code`、`index_busy`、工具名等内部信息
+- agent 是否停在这一步，不改道调其它工具或伪造检索结果
+
 ## 运行方式
 
 用户在企微里完成真实测试后，执行：

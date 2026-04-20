@@ -19,7 +19,8 @@
 3. 把 PDF 写入 `knowledge_base/`
 4. 计算上传结果
 5. 保存最近上传记录
-6. 返回简短确认
+6. 若 `upload_action` 是 `added` / `replaced`，调 `schedule_index_rebuild(file_name)` 触发后台索引重建（非阻塞），并写入 `index_rebuild_scheduled` flow 事件
+7. 返回简短确认
 
 当前 `upload_action` 可能是：
 
@@ -27,6 +28,18 @@
 - `replaced`
 - `unchanged`
 - `duplicate_content`
+
+其中 `added` / `replaced` 触发后台索引；`unchanged` / `duplicate_content` 不改变 `knowledge_base/*.pdf`，不触发重建。
+
+## 流程 1b：索引更新中的搜索查询
+
+如果用户在索引重建期间（scheduler worker 仍持有 `_BUILD_LOCK`）发起 RAG 检索：
+
+1. `/chat` 收到检索请求，agent 调 `llamaindex_rag__llamaindex_rag_search`
+2. `engine.search()` 调 `builder.build_or_fail()`
+3. lock 被占用，立即抛 `IndexBusy`
+4. `search_local_rag` 捕获 `IndexBusy`，查 scheduler 状态，返回 JSON `{"error_code":"index_busy","pending_files":[...],"eta_seconds":N}` 给 agent
+5. agent 按 prompt 规则回复"知识库正在为新上传文件建立索引（剩 N 个文件，约 N 秒），稍等再发一遍问题即可"，不改道调其它工具
 
 ## 流程 2：上传后用户马上问“这份文档是不是已经加入知识库了”
 

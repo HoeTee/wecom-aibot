@@ -5,10 +5,11 @@
 核心闭环：
 
 1. 接收企微文本消息或 PDF 上传
-2. 结合知识库、会话状态和外部 MCP 能力理解请求
-3. 创建或更新企业微信文档 / 智能表格
-4. 通过 `doc_id`、`doc_url`、`doc_name` 维持连续性
-5. 通过 SQLite 和记日志保存最近上传状态、tool 调用和最终回复
+2. PDF 上传写入 `knowledge_base/` 后，由 `IndexRebuildScheduler` 在后台重建检索索引（非阻塞，与检索侧共用 `_BUILD_LOCK`）
+3. 结合知识库、会话状态和外部 MCP 能力理解请求
+4. 创建或更新企业微信文档 / 智能表格
+5. 通过 `doc_id`、`doc_url`、`doc_name` 维持连续性
+6. 通过 SQLite 和记日志保存最近上传状态、tool 调用和最终回复
 
 `AGENTS.md` 只做索引，不写长手册。
 

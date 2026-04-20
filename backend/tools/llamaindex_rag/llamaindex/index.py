@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, UTC
 from pathlib import Path
@@ -14,6 +16,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_PERSIST_DIR = PROJECT_ROOT / "data" / "index" / "persist"
 DEFAULT_MANIFEST_PATH = PROJECT_ROOT / "data" / "index" / "manifest.json"
 MANIFEST_VERSION = 2
+DEFAULT_LOAD_WORKERS = 4
+
+
+_BUILD_LOCK = threading.Lock()
+
+
+class IndexBusy(Exception):
+    def __init__(self) -> None:
+        super().__init__("index rebuild in progress")
 
 
 @dataclass
@@ -169,9 +180,7 @@ class LlamaIndexBuilder:
         changed_summary_map: dict[str, Document] = {}
         files_to_reload = added + changed
         if files_to_reload:
-            file_map = self.loader._pdf_file_map()
-            reload_paths = [file_map[file_name] for file_name in files_to_reload]
-            documents = self.loader.load(file_paths=reload_paths)
+            documents = self._load_files_parallel(files_to_reload)
             changed_summary_documents = self._summary_documents(documents)
             changed_summary_map = {
                 document.metadata.get("file_name", document.doc_id): document
@@ -211,7 +220,24 @@ class LlamaIndexBuilder:
             summary_documents=summary_documents,
         )
 
-    def build(self) -> IndexBundle:
+    def _load_files_parallel(self, file_names: list[str]) -> list[Document]:
+        if not file_names:
+            return []
+        file_map = self.loader._pdf_file_map()
+        paths = [file_map[name] for name in file_names if name in file_map]
+        if not paths:
+            return []
+        if len(paths) == 1:
+            return self.loader.load(file_paths=paths)
+
+        workers = min(DEFAULT_LOAD_WORKERS, len(paths))
+        documents: list[Document] = []
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pdf-load") as pool:
+            for batch in pool.map(lambda p: self.loader.load(file_paths=[p]), paths):
+                documents.extend(batch)
+        return documents
+
+    def _build_locked(self) -> IndexBundle:
         current_hashes = self._current_file_hashes()
         manifest = self._read_manifest()
         manifest_files = manifest.get("files", {}) if manifest.get("version") == MANIFEST_VERSION else {}
@@ -234,3 +260,15 @@ class LlamaIndexBuilder:
         except Exception as exc:
             print(f"Failed to apply incremental index update: {exc}. Rebuilding index.")
             return self._full_rebuild(current_hashes)
+
+    def build(self) -> IndexBundle:
+        with _BUILD_LOCK:
+            return self._build_locked()
+
+    def build_or_fail(self) -> IndexBundle:
+        if not _BUILD_LOCK.acquire(blocking=False):
+            raise IndexBusy()
+        try:
+            return self._build_locked()
+        finally:
+            _BUILD_LOCK.release()
