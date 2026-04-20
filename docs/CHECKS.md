@@ -201,6 +201,12 @@
 - 事中 guard
 - 事后 evaluator
 
+此外，上传类检查必须覆盖：
+
+- 上传成功后（`upload_action` 是 `added` / `replaced`）flow_trace 里应出现 `index_rebuild_scheduled` 事件
+- 用户说"帮我上传 PDF"一类语义时，agent 回复**不得**出现"不支持上传"字样
+- RAG 检索工具返回 `index_busy` 时，agent 回复应匹配 `REPLY_STYLE.md` 中"索引更新中的应答"风格，不得泄漏 `error_code` / `index_busy` / 工具名等内部词
+
 ### 3. 是否误复用旧文档
 
 例如：

@@ -4,8 +4,6 @@ import asyncio
 import unittest
 
 from backend.runtime.local_tools import (
-    DOC_APPEND_SECTION_TOOL_NAME,
-    DOC_READ_MARKDOWN_TOOL_NAME,
     KB_DELETE_FILE_TOOL_NAME,
     KB_EXPORT_FILE_TOOL_NAME,
     KB_LIST_FILES_TOOL_NAME,
@@ -22,15 +20,14 @@ from backend.tools.llamaindex_rag.runtime import (
 
 
 class LocalAgentToolsTests(unittest.TestCase):
-    def test_local_agent_tools_expose_kb_doc_and_rag_families(self) -> None:
+    def test_local_agent_tools_expose_kb_and_rag_families(self) -> None:
         tool_names = {tool["function"]["name"] for tool in get_local_agent_tools()}
         self.assertIn(KB_LIST_FILES_TOOL_NAME, tool_names)
         self.assertIn(KB_MATCH_RELATED_TOOL_NAME, tool_names)
         self.assertIn(KB_EXPORT_FILE_TOOL_NAME, tool_names)
-        self.assertIn(DOC_READ_MARKDOWN_TOOL_NAME, tool_names)
-        self.assertIn(DOC_APPEND_SECTION_TOOL_NAME, tool_names)
         self.assertIn(LOCAL_RAG_SEARCH_TOOL_NAME, tool_names)
         self.assertNotIn("kb__list_recent_uploads", tool_names)
+        self.assertFalse(any(name.startswith("doc__") for name in tool_names))
 
     def test_local_rag_tools_expose_search_only(self) -> None:
         tool_names = {tool["function"]["name"] for tool in get_local_rag_tools()}

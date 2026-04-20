@@ -35,6 +35,10 @@
 - `matched_file_name`
 - `matched_stored_path`
 
+若 `upload_action` 是 `added` / `replaced`，后端会再调 `schedule_index_rebuild(file_name)` 触发后台索引重建，并写入 `index_rebuild_scheduled` flow 事件。`unchanged` / `duplicate_content` 不动 `knowledge_base/*.pdf`，不触发重建。
+
+上传能力是产品固有能力而非 agent 工具——prompt 要求 agent 在用户说"我要上传 / 帮我把 PDF 加进知识库"时直接指引用户在个人聊天窗口发送文件，而不是回"不支持"。
+
 ## `/chat` 的主路由
 
 `backend/flow/chat.py` 的主顺序是：

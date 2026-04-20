@@ -112,6 +112,15 @@ llamaindex_rag__llamaindex_rag_search
 - 对本地知识库 PDF 做检索
 - 给文档写作提供来源片段
 
+可能返回的结构化错误：
+
+- 后台正在为新上传的 PDF 重建索引时，该工具立即返回 `{"error_code":"index_busy","pending_files":[...],"eta_seconds":N}`，不阻塞等待
+- agent 看到此结构化文本后必须按 prompt 的"检索正忙"规则回复用户稍等重试，不得改道调其它工具
+
+另外：
+
+- 系统支持用户在个人聊天窗口直接发送 PDF 入知识库。这个动作由 `POST /knowledge-base/upload` 固化处理，**不是** agent 可调用的工具。agent 不应把"帮我上传 PDF"误当成不支持能力。
+
 ## prompt 对工具调用的额外限制
 
 除了工具本身的参数校验，系统 prompt 还施加了这些约束：

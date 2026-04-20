@@ -172,10 +172,9 @@ class LoadMemoryContextTests(unittest.TestCase):
 
                 memory_context = store.load_memory_context("dm:test", include_bound_doc=False)
 
-                self.assertIn("Recent turn states", memory_context)
-                self.assertIn("turn request_id=req-1", memory_context)
-                self.assertIn("tool=kb__list_files", memory_context)
-                self.assertIn("assistant=已列出知识库文件。", memory_context)
+                self.assertIn("Recent conversation turns", memory_context)
+                self.assertIn("kb__list_files", memory_context)
+                self.assertIn("已列出知识库文件", memory_context)
             finally:
                 for conn in connections:
                     conn.close()
